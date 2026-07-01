@@ -1,7 +1,7 @@
 const axios = require('axios');
 const mongoose = require('mongoose');
 
-// Esquema de Cache no MongoDB para economizar requisições da API
+// Esquema de Cache no MongoDB
 const CacheSchema = new mongoose.Schema({
     endpoint: { type: String, required: true, unique: true },
     data: { type: mongoose.Schema.Types.Mixed, required: true },
@@ -11,7 +11,7 @@ const Cache = mongoose.model('Cache', CacheSchema);
 
 const API_KEY = process.env.API_FOOTBALL_KEY;
 const BASE_URL = 'https://v3.football.api-sports.io';
-const CACHE_TTL = 12 * 60 * 60 * 1000; // Cache de 12 horas para economizar créditos
+const CACHE_TTL = 12 * 60 * 60 * 1000; // Cache de 12 horas
 
 const apiClient = axios.create({
     baseURL: BASE_URL,
@@ -21,14 +21,12 @@ const apiClient = axios.create({
     }
 });
 
-// Função genérica de busca com Cache integrado ao MongoDB
 async function fetchWithCache(endpoint) {
     const cached = await Cache.findOne({ endpoint });
     const now = new Date();
 
-    // Retorna do banco de dados se o cache ainda for válido
     if (cached && (now - cached.lastUpdated < CACHE_TTL)) {
-        console.log(`[CACHE HIT - MONGODB] ${endpoint}`);
+        console.log(`[CACHE HIT] ${endpoint}`);
         return cached.data;
     }
 
@@ -37,7 +35,6 @@ async function fetchWithCache(endpoint) {
         const response = await apiClient.get(endpoint);
         const responseData = response.data.response;
 
-        // Atualiza ou cria o cache no MongoDB
         if (cached) {
             cached.data = responseData;
             cached.lastUpdated = now;
@@ -49,23 +46,26 @@ async function fetchWithCache(endpoint) {
         return responseData;
     } catch (error) {
         console.error(`Erro na API Football para ${endpoint}:`, error.message);
-        return cached ? cached.data : []; // Em caso de erro, tenta retornar o cache velho
+        return cached ? cached.data : [];
     }
 }
 
-// IDs oficiais para Mundial 2026 (Exemplo, o League ID oficial de Copa do Mundo geralmente é 1)
-const WORLD_CUP_LEAGUE_ID = 1;
+const WORLD_CUP_LEAGUE_ID = 1; // ID oficial da Copa do Mundo na API-Football
 const SEASON = 2026;
 
 async function getTodayMatches() {
-    const date = new Date().toISOString().split('T')[0]; // Data de Hoje (YYYY-MM-DD)
-    const endpoint = `/fixtures?league=${WORLD_CUP_LEAGUE_ID}&season=${SEASON}&date=${date}`;
+    // 1. Força a data atual para o fuso horário do Brasil (BRT) no formato YYYY-MM-DD
+    const dateBRT = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+
+    // 2. Envia o parâmetro "timezone" para a API também retornar os horários baseados no Brasil
+    const endpoint = `/fixtures?league=${WORLD_CUP_LEAGUE_ID}&season=${SEASON}&date=${dateBRT}&timezone=America/Sao_Paulo`;
+    
     return await fetchWithCache(endpoint);
 }
 
 async function getHistoryMatches() {
-    // Últimos 15 jogos finalizados da competição para mostrar na aba Histórico VIP
-    const endpoint = `/fixtures?league=${WORLD_CUP_LEAGUE_ID}&season=${SEASON}&status=FT&last=15`;
+    // Adiciona o timezone no histórico também para manter o padrão
+    const endpoint = `/fixtures?league=${WORLD_CUP_LEAGUE_ID}&season=${SEASON}&status=FT&last=15&timezone=America/Sao_Paulo`;
     return await fetchWithCache(endpoint);
 }
 
