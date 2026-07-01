@@ -56,8 +56,6 @@ async function fetchWithCache(endpoint, customTTL) {
     }
 }
 
-// 🔥 BUSCA ODDS REAIS DA API-SPORTS
-// Usamos TTL variavel para proteger a cota do usuario
 async function getRealOdds(fixtureId, ttl) {
     const oddsData = await fetchWithCache(`/odds?fixture=${fixtureId}`, ttl);
     if (!oddsData || oddsData.length === 0) return null;
@@ -70,6 +68,20 @@ async function getRealOdds(fixtureId, ttl) {
 
 const WORLD_CUP_LEAGUE_ID = 1;
 
+// 🛠️ FUNÇÃO NOVA: Valida se o jogo já terminou por Status ou por TEMPO (> 4 horas)
+function isMatchFinished(jogo) {
+    const status = jogo.fixture?.status?.short;
+    
+    // Status conhecidos de encerramento ou adiamento
+    if (['FT', 'AET', 'PEN', 'CANC', 'PST', 'ABD', 'AWD', 'WO'].includes(status)) return true;
+
+    // Fallback: Se já passaram 4 horas (14400 segundos) desde o horário do apito inicial, está finalizado.
+    const timeElapsedSeconds = Math.floor(Date.now() / 1000) - jogo.fixture.timestamp;
+    if (timeElapsedSeconds > 4 * 60 * 60) return true;
+
+    return false;
+}
+
 async function getTodayMatches() {
     const dateHojeBRT = new Intl.DateTimeFormat('en-CA', {
         timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit'
@@ -79,11 +91,19 @@ async function getTodayMatches() {
     if(!todosOsJogos || todosOsJogos.length === 0) return [];
 
     let jogosCopaHoje = todosOsJogos.filter(jogo => jogo.league && jogo.league.id === WORLD_CUP_LEAGUE_ID);
-    jogosCopaHoje = jogosCopaHoje.filter(jogo => !['FT', 'AET', 'PEN', 'CANC', 'PST', 'ABD'].includes(jogo.fixture?.status?.short));
     
-    // Injeta ODDS REAIS nos jogos de hoje. TTL de 2 horas para economizar créditos.
+    // Filtra removendo todos os jogos que já acabaram (segundo a nova regra robusta)
+    jogosCopaHoje = jogosCopaHoje.filter(jogo => !isMatchFinished(jogo));
+    
     const matchesWithOdds = await Promise.all(jogosCopaHoje.map(async (jogo) => {
-        const odds = await getRealOdds(jogo.fixture.id, 2 * 60 * 60 * 1000);
+        // 🔥 SUPER ECONOMIA DE CRÉDITO:
+        // Se o jogo já começou (horário de agora > timestamp), as odds Pré-Live NUNCA MAIS MUDAM.
+        // Logo, fazemos um cache de 30 dias pra ele parar de gastar créditos! 
+        // Se ainda não começou, faz o cache normal de 2 horas.
+        const matchStarted = Math.floor(Date.now() / 1000) > jogo.fixture.timestamp;
+        const ttl = matchStarted ? (30 * 24 * 60 * 60 * 1000) : (2 * 60 * 60 * 1000);
+        
+        const odds = await getRealOdds(jogo.fixture.id, ttl);
         return { ...jogo, real_odds: odds };
     }));
 
@@ -108,12 +128,14 @@ async function getHistoryMatches() {
 
     let todosJogos = [...(jogosHoje || []), ...(jogosOntem || [])];
     let historicoCopa = todosJogos.filter(jogo => jogo.league && jogo.league.id === WORLD_CUP_LEAGUE_ID);
-    historicoCopa = historicoCopa.filter(m => ['FT', 'PEN', 'AET'].includes(m.fixture?.status?.short));
+    
+    // Puxa pro histórico jogos que terminaram e que tenham placar (evita jogos cancelados)
+    historicoCopa = historicoCopa.filter(jogo => isMatchFinished(jogo) && jogo.goals && jogo.goals.home !== null);
     historicoCopa.sort((a,b) => b.fixture.timestamp - a.fixture.timestamp);
     
     const jogosCortados = historicoCopa.slice(0, 15);
 
-    // Injeta ODDS REAIS no histórico. Como é histórico (já acabou), fazemos cache por 30 DIAS! Gasto zero futuro.
+    // O histórico sempre teve TTL de 30 dias, custo zero na API após carregar a primeira vez.
     const matchesWithOdds = await Promise.all(jogosCortados.map(async (jogo) => {
         const odds = await getRealOdds(jogo.fixture.id, 30 * 24 * 60 * 60 * 1000);
         return { ...jogo, real_odds: odds };
