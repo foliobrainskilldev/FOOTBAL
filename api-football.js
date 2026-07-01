@@ -65,9 +65,7 @@ async function fetchWithCache(endpoint, fetchFunction, customTTL, fallbackData) 
         console.log(`📡 BUSCANDO API: ${endpoint}`);
         const rData = await fetchFunction();
         
-        // CORREÇÃO DO ERRO DO MONGODB (E11000): 
-        // Usamos updateOne com upsert:true e tratamento de exceção silencioso.
-        // Impede colisões quando muitos acessam ao mesmo tempo!
+        // CORREÇÃO DO ERRO DO MONGODB (E11000)
         try {
             await Cache.updateOne(
                 { endpoint: endpoint },
@@ -95,10 +93,15 @@ async function fetchWithCache(endpoint, fetchFunction, customTTL, fallbackData) 
 // 1. DADOS DAS PARTIDAS (FOOTBALL-DATA.ORG)
 // ==========================================
 async function getMatchesData() {
-    // CORREÇÃO DO ERRO 400: Retiramos o DateFrom/DateTo e puxamos tudo de uma vez.
     const endpoint = `fd_matches_wc_all`;
     return fetchWithCache(endpoint, async () => {
-        const url = `https://api.football-data.org/v4/competitions/2000/matches`;
+        // CORREÇÃO DO ERRO 400: Filtramos a busca pela rota principal (/v4/matches) limitando as datas
+        // Isso evita que a API bloqueie a requisição tentando trazer toda a competição de uma vez.
+        const today = new Date();
+        const dateFrom = new Date(today.getTime() - 3 * 86400000).toISOString().split('T')[0];
+        const dateTo = new Date(today.getTime() + 3 * 86400000).toISOString().split('T')[0];
+        
+        const url = `https://api.football-data.org/v4/matches?competitions=2000&dateFrom=${dateFrom}&dateTo=${dateTo}`;
         const res = await axios.get(url, { headers: { 'X-Auth-Token': FD_API_KEY } });
         return res.data.matches || [];
     }, 1 * 60 * 60 * 1000, getMockMatches()); 
@@ -111,15 +114,15 @@ async function getOddsApiEvents() {
     return fetchWithCache('odds_api_events', async () => {
         const url = `https://api.odds-api.io/v3/events?apiKey=${ODDS_API_KEY}&sport=football`;
         const res = await axios.get(url);
-        return res.data;
+        return res.data || [];
     }, 4 * 60 * 60 * 1000, []); 
 }
 
 async function getOddsForEvent(eventId) {
     if (!eventId) return null;
     return fetchWithCache(`odds_api_match_${eventId}`, async () => {
-        // CORREÇÃO DO ERRO 400 (Odds API): Obrigatório incluir as casas de aposta (?bookmakers) na URL
-        const url = `https://api.odds-api.io/v3/odds?apiKey=${ODDS_API_KEY}&eventId=${eventId}&bookmakers=bet365,draftkings,williamhill,bwin`;
+        // CORREÇÃO DO ERRO 400: Passar os nomes das casas de apostas respeitando letras maiúsculas/minúsculas 
+        const url = `https://api.odds-api.io/v3/odds?apiKey=${ODDS_API_KEY}&eventId=${eventId}&bookmakers=Bet365,DraftKings,Betfair`;
         const res = await axios.get(url);
         return res.data;
     }, 4 * 60 * 60 * 1000, null);
@@ -142,33 +145,73 @@ function findEventId(oddsEvents, homeName, awayName) {
 
 function mapOddsApiIo(oddsJson) {
     if (!oddsJson || !oddsJson.bookmakers) return fallbackOdds;
-    const bookies = Object.keys(oddsJson.bookmakers);
-    if (bookies.length === 0) return fallbackOdds;
     
-    let targetBookie = bookies.find(b => b.toLowerCase().includes('bet365')) || bookies[0];
-    const markets = oddsJson.bookmakers[targetBookie];
-    if (!markets || !Array.isArray(markets)) return fallbackOdds;
+    try {
+        let bookies = [];
+        
+        // Híbrido: Suporta caso a API retorne um Array ou um Objeto
+        if (Array.isArray(oddsJson.bookmakers)) {
+            bookies = oddsJson.bookmakers;
+        } else {
+            const keys = Object.keys(oddsJson.bookmakers);
+            if (keys.length === 0) return fallbackOdds;
+            keys.forEach(k => {
+                bookies.push({ key: k, markets: oddsJson.bookmakers[k] });
+            });
+        }
 
-    const realOdds = [];
+        let targetBookie = bookies.find(b => b.key.toLowerCase().includes('bet365')) || bookies[0];
+        let markets = targetBookie.markets;
+        
+        if (!markets) return fallbackOdds;
 
-    const moneyline = markets.find(m => m.name && (m.name.toLowerCase() === 'moneyline' || m.name.toLowerCase() === 'match winner'));
-    if (moneyline && moneyline.odds && moneyline.odds.length > 0) {
-        const o = moneyline.odds[0];
-        if (o.home && o.away && o.draw) realOdds.push({ id: 1, values: [{value: 'Home', odd: parseFloat(o.home)}, {value: 'Away', odd: parseFloat(o.away)}, {value: 'Draw', odd: parseFloat(o.draw)}] });
+        const realOdds = [];
+
+        // Extrai Odds dependendo do formato de resposta retornado
+        if (!Array.isArray(markets)) {
+            // Formato Objeto
+            if (markets.moneyline) {
+                const o = markets.moneyline;
+                if (o.home && o.away && o.draw) {
+                    realOdds.push({ id: 1, values: [{value: 'Home', odd: parseFloat(o.home)}, {value: 'Away', odd: parseFloat(o.away)}, {value: 'Draw', odd: parseFloat(o.draw)}] });
+                }
+            }
+            if (markets.totals) {
+                let totalsArr = Array.isArray(markets.totals) ? markets.totals : [markets.totals];
+                const u25 = totalsArr.find(o => String(o.hdp) === "2.5" || o.name === "Under 2.5");
+                if (u25 && u25.under) realOdds.push({ id: 5, values: [{value: 'Under 2.5', odd: parseFloat(u25.under)}] });
+            }
+            if (markets.btts || markets.both_teams_to_score) {
+                const btts = markets.btts || markets.both_teams_to_score;
+                if (btts && btts.yes) realOdds.push({ id: 8, values: [{value: 'Yes', odd: parseFloat(btts.yes)}] });
+            }
+        } else {
+            // Formato Array Tradicional
+            const moneyline = markets.find(m => m.name && (m.name.toLowerCase() === 'moneyline' || m.name.toLowerCase() === 'match winner'));
+            if (moneyline && moneyline.odds && moneyline.odds.length > 0) {
+                const o = moneyline.odds[0];
+                if (o.home && o.away && o.draw) {
+                    realOdds.push({ id: 1, values: [{value: 'Home', odd: parseFloat(o.home)}, {value: 'Away', odd: parseFloat(o.away)}, {value: 'Draw', odd: parseFloat(o.draw)}] });
+                }
+            }
+
+            const totals = markets.find(m => m.name && (m.name.toLowerCase() === 'totals' || m.name.toLowerCase() === 'over/under'));
+            if (totals && totals.odds) {
+                const u25 = totals.odds.find(o => String(o.hdp) === "2.5" || o.name === "Under 2.5");
+                if (u25 && u25.under) realOdds.push({ id: 5, values: [{value: 'Under 2.5', odd: parseFloat(u25.under)}] });
+            }
+
+            const btts = markets.find(m => m.name && m.name.toLowerCase().includes('both teams to score'));
+            if (btts && btts.odds && btts.odds.length > 0) {
+                if (btts.odds[0].yes) realOdds.push({ id: 8, values: [{value: 'Yes', odd: parseFloat(btts.odds[0].yes)}] });
+            }
+        }
+
+        return realOdds.length > 0 ? realOdds : fallbackOdds;
+    } catch (e) {
+        console.error("🚨 ERRO NO MAPEAMENTO DE ODDS:", e.message);
+        return fallbackOdds;
     }
-
-    const totals = markets.find(m => m.name && (m.name.toLowerCase() === 'totals' || m.name.toLowerCase() === 'over/under'));
-    if (totals && totals.odds) {
-        const u25 = totals.odds.find(o => String(o.hdp) === "2.5" || o.name === "Under 2.5");
-        if (u25 && u25.under) realOdds.push({ id: 5, values: [{value: 'Under 2.5', odd: parseFloat(u25.under)}] });
-    }
-
-    const btts = markets.find(m => m.name && m.name.toLowerCase().includes('both teams to score'));
-    if (btts && btts.odds && btts.odds.length > 0) {
-        if (btts.odds[0].yes) realOdds.push({ id: 8, values: [{value: 'Yes', odd: parseFloat(btts.odds[0].yes)}] });
-    }
-
-    return realOdds.length > 0 ? realOdds : fallbackOdds;
 }
 
 // ==========================================
@@ -216,7 +259,6 @@ async function getTodayMatches() {
     const dateHoje = getBrazilDateStr(new Date());
     const rawMatches = await getMatchesData(); 
     
-    // Filtro no Backend: Só puxamos da matriz inteira os jogos de hoje!
     let matches = rawMatches.filter(m => getBrazilDateStr(m.utcDate) === dateHoje && !isMatchFinished(m.status)).map(mapToAppFormat);
     return await injectOdds(matches);
 }
