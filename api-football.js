@@ -21,29 +21,25 @@ async function fetchWithCache(endpoint) {
     const cached = await Cache.findOne({ endpoint });
     const now = new Date();
     
-    // GATILHO SALVADOR DO MONGODB PRESO:
-    // Só consome o dado armazenado se o que o DB tiver NÃO FOR VAZIO (excluí arrays limpos da falha passada)
     if (cached && (now - cached.lastUpdated < CACHE_TTL)) {
         if (Array.isArray(cached.data) && cached.data.length === 0) {
-            console.log(`🧹 CACHE INVALIDADO: O Banco guardou zero []. Rasgando BD para tentar a plataforma Original. Endpoint: ${endpoint}`);
+            console.log(`🧹 CACHE VAZIO: Tentando buscar novamente...`);
         } else {
             return cached.data;
         }
     }
     
     try {
-        console.log(`📡 COMUNICANDO PELA WEB (Dados Reais): Consultando ${endpoint}...`);
+        console.log(`📡 BUSCANDO NA API: ${endpoint}`);
         const res = await apiClient.get(endpoint);
         
         if (res.data.errors && Object.keys(res.data.errors).length > 0) {
-            console.error('🚫 Erro bloqueante real na API API-Sports: ', res.data.errors);
-            return []; // Fator limitante atingido (Keys / Credits etc)
+            console.error('🚫 Erro na API:', res.data.errors);
+            return []; 
         }
 
         const rData = res.data.response;
         
-        // APENAS salverá como CACHE futuro de longo tempo, se existirem itens/partidas!
-        // Impede completamente que noites ou falhas prendam sua plataforma!
         if (rData && rData.length > 0) {
             if (cached) {
                 cached.data = rData;
@@ -54,54 +50,63 @@ async function fetchWithCache(endpoint) {
             }
         }
         
-        return rData;
+        return rData || [];
     } catch (err) {
         console.error(`🚨 Axios - Falha Rede Direta:`, err.message);
         return [];
     }
 }
 
-const LEAGUE = 1; // Copa
-const SEASON = 2026; 
+const WORLD_CUP_LEAGUE_ID = 1;
 
 async function getTodayMatches() {
-    // 1. Coleta Hoje estritamente TimeZone Brasileira  Ex (2026-06-30)
+    // 1. Pega a data de hoje no fuso do Brasil
     const dateHojeBRT = new Intl.DateTimeFormat('en-CA', {
         timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit'
     }).format(new Date()); 
     
-    const endpointRealHoje = `/fixtures?league=${LEAGUE}&season=${SEASON}&date=${dateHojeBRT}&timezone=America/Sao_Paulo`;
+    // 🔥 O SEGREDO DO BOT PYTHON: Busca TODOS os jogos da data, sem informar a Temporada/Liga
+    const endpoint = `/fixtures?date=${dateHojeBRT}&timezone=America/Sao_Paulo`;
     
-    // Processamento da tentativa 1 (O Hoje do Calendário Mundial):
-    let dadosReaisEncontrados = await fetchWithCache(endpointRealHoje);
+    let todosOsJogosDoDia = await fetchWithCache(endpoint);
 
-    // SISTEMA PRO "PRÓXIMA REAL DISPONÍVEL" (ANTI TELA VAZIA E VERÍDICA!):
-    // Na possibilidade fática ou descanso em dias como Terça pra voltar Quarta.. Ela rasga a home trazendo só a verídica 'da próxima disponível': 
-    if(!dadosReaisEncontrados || dadosReaisEncontrados.length === 0) {
-        console.log(`⏱ Sem eventos pra ${dateHojeBRT}. Pegando oficiosamente 'Os 5 proximos da Copa real' direto...`);
-        const endpointGenuinoAdicionalFallback = `/fixtures?league=${LEAGUE}&season=${SEASON}&next=5&timezone=America/Sao_Paulo`;
-        dadosReaisEncontrados = await fetchWithCache(endpointGenuinoAdicionalFallback);
+    if(!todosOsJogosDoDia || todosOsJogosDoDia.length === 0) {
+        return [];
     }
+
+    // 🔥 FILTRO LOCAL: Pega apenas os da Copa do Mundo (Exatamente como estava no api.py)
+    const jogosCopaHoje = todosOsJogosDoDia.filter(jogo => jogo.league && jogo.league.id === WORLD_CUP_LEAGUE_ID);
     
-    return dadosReaisEncontrados;
+    return jogosCopaHoje;
 }
 
 async function getHistoryMatches() {
-    const end = `/fixtures?league=${LEAGUE}&season=${SEASON}&timezone=America/Sao_Paulo`;
-    const all = await fetchWithCache(end);
-    if(!all || !all.length) return [];
+    // Para o histórico não dar erro de temporada, buscamos todos os jogos do DIA DE ONTEM
+    const ontem = new Date();
+    ontem.setDate(ontem.getDate() - 1);
+    const dateOntemBRT = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit'
+    }).format(ontem);
+
+    const endpoint = `/fixtures?date=${dateOntemBRT}&timezone=America/Sao_Paulo`;
+    const todosJogosOntem = await fetchWithCache(endpoint);
+
+    if(!todosJogosOntem || todosJogosOntem.length === 0) return [];
     
-    const comTempoFinalizadoGenuinamente = all.filter(m => {
+    // Filtra pela Copa do Mundo
+    let historicoCopa = todosJogosOntem.filter(jogo => jogo.league && jogo.league.id === WORLD_CUP_LEAGUE_ID);
+
+    // Garante que só retorna os finalizados (FT, PEN, AET)
+    historicoCopa = historicoCopa.filter(m => {
         if (!m.fixture || !m.fixture.status) return false;
         return ['FT', 'PEN', 'AET'].includes(m.fixture.status.short);
     });
 
-    comTempoFinalizadoGenuinamente.sort((a,b) => (b.fixture.timestamp || 0) - (a.fixture.timestamp || 0));
-
-    return comTempoFinalizadoGenuinamente.slice(0, 15);
+    return historicoCopa.slice(0, 15);
 }
 
 async function getPredictions(id) {
+    // Assim como no `analysis.py`, buscar predictions direto pelo ID da Fixture não bloqueia
     return await fetchWithCache(`/predictions?fixture=${id}`);
 }
 
