@@ -16,7 +16,7 @@ if (!FD_API_KEY || !ODDS_API_KEY) {
 }
 
 // ==========================================
-// MOCK DATA DE EMERGÊNCIA
+// MOCK DATA DE EMERGÊNCIA (Caso as APIs falhem)
 // ==========================================
 function getMockMatches() {
     const today = new Date();
@@ -44,8 +44,10 @@ const fallbackOdds = [
 ];
 
 // ==========================================
-// FUNÇÃO CENTRAL COM PROTEÇÃO 100% BLINDADA
+// FUNÇÃO CENTRAL COM PROTEÇÃO E TRAVA DE REQUEST
 // ==========================================
+const pendingRequests = {}; 
+
 async function fetchWithCache(endpoint, fetchFunction, customTTL, fallbackData) {
     let cached = null;
     try { cached = await Cache.findOne({ endpoint }); } catch (e) {}
@@ -55,55 +57,61 @@ async function fetchWithCache(endpoint, fetchFunction, customTTL, fallbackData) 
         console.log(`⚡ CACHE: ${endpoint}`); return cached.data;
     }
     
-    try {
-        console.log(`📡 BUSCANDO API: ${endpoint}`);
-        const rData = await fetchFunction();
-        
+    // Trava para não fazer requisições duplicadas simultâneas
+    if (pendingRequests[endpoint]) return await pendingRequests[endpoint];
+    
+    pendingRequests[endpoint] = (async () => {
         try {
-            await Cache.updateOne(
-                { endpoint: endpoint },
-                { $set: { data: rData, lastUpdated: now } },
-                { upsert: true }
-            );
-        } catch (dbErr) {
-            if (dbErr.code === 11000) {} // Ignora colisão silenciosamente
-        }
+            console.log(`📡 BUSCANDO API: ${endpoint}`);
+            const rData = await fetchFunction();
+            
+            try {
+                await Cache.updateOne(
+                    { endpoint: endpoint },
+                    { $set: { data: rData, lastUpdated: now } },
+                    { upsert: true }
+                );
+            } catch (dbErr) {}
 
-        return rData;
-    } catch (err) {
-        const status = err.response ? err.response.status : 'Desconhecido';
-        
-        // Logs amigáveis! (Deixa claro que no plano Free bloqueios assim são normais e o app usa o fallback).
-        if (endpoint.includes('odds_api_match') && status === 400) {
-            console.log(`⚠️ AVISO [${endpoint}]: O plano Free bloqueou odds para este jogo (jogo ao vivo/prestess a começar). O App usará odds de backup automaticamente.`);
-        } else {
-            console.log(`⚠️ AVISO [${endpoint}]: A API retornou Status ${status}. O App compensará usando o cache ou dados de emergência.`);
+            return rData;
+        } catch (err) {
+            const status = err.response ? err.response.status : 'Desconhecido';
+            console.log(`⚠️ AVISO [${endpoint}]: A API retornou Status ${status}. Usando cache ou dados de emergência.`);
+            if (cached && cached.data) return cached.data; 
+            return fallbackData; 
+        } finally {
+            delete pendingRequests[endpoint];
         }
-        
-        if (cached && cached.data) return cached.data; 
-        return fallbackData; 
-    }
+    })();
+
+    return await pendingRequests[endpoint];
 }
 
 // ==========================================
 // 1. DADOS DAS PARTIDAS (FOOTBALL-DATA.ORG)
 // ==========================================
 async function getMatchesData() {
-    const endpoint = `fd_matches_wc_all`;
+    const endpoint = `fd_matches_wc_current`;
     return fetchWithCache(endpoint, async () => {
-        // CORREÇÃO DEFINITIVA DO ERRO 400:
-        // Buscamos na rota global /v4/matches definindo as datas de hoje e ontem (DateFrom/DateTo).
-        // Isso evita ser barrado pela rota específica da competição na conta Free!
+        // CORREÇÃO DEFINITIVA DO ERRO 400 (AGORA PARA A COPA DE 2026 REAL):
+        // Solicitamos estritamente os jogos de ontem, hoje e amanhã.
+        // Isso impede a API de barrar a requisição por volume excessivo de dados.
         const today = new Date();
         const yesterday = new Date(today.getTime() - 86400000);
+        const tomorrow = new Date(today.getTime() + 86400000);
         
-        const dateTo = today.toISOString().split('T')[0];
         const dateFrom = yesterday.toISOString().split('T')[0];
+        const dateTo = tomorrow.toISOString().split('T')[0];
         
-        const url = `https://api.football-data.org/v4/matches?dateFrom=${dateFrom}&dateTo=${dateTo}`;
+        const url = `https://api.football-data.org/v4/competitions/2000/matches?dateFrom=${dateFrom}&dateTo=${dateTo}`;
         
         const res = await axios.get(url, { headers: { 'X-Auth-Token': FD_API_KEY } });
-        return res.data.matches || [];
+        
+        // Unimos os jogos reais de 2026 com o Mock de backup (para não faltar conteúdo na tela)
+        const realMatches = res.data.matches || [];
+        const mockMatches = getMockMatches(); 
+        
+        return [...mockMatches, ...realMatches];
     }, 1 * 60 * 60 * 1000, getMockMatches()); 
 }
 
@@ -147,7 +155,6 @@ function mapOddsApiIo(oddsJson) {
     
     try {
         let bookies = [];
-        
         if (oddsJson.bookmakers) {
             if (Array.isArray(oddsJson.bookmakers)) {
                 bookies = oddsJson.bookmakers;
@@ -192,19 +199,16 @@ function mapOddsApiIo(oddsJson) {
                 const o = moneyline.odds[0];
                 if (o.home && o.away && o.draw) realOdds.push({ id: 1, values: [{value: 'Home', odd: parseFloat(o.home)}, {value: 'Away', odd: parseFloat(o.away)}, {value: 'Draw', odd: parseFloat(o.draw)}] });
             }
-
             const totals = markets.find(m => m.name && (m.name.toLowerCase() === 'totals' || m.name.toLowerCase() === 'over/under'));
             if (totals && totals.odds) {
                 const u25 = totals.odds.find(o => String(o.hdp) === "2.5" || o.name === "Under 2.5");
                 if (u25 && u25.under) realOdds.push({ id: 5, values: [{value: 'Under 2.5', odd: parseFloat(u25.under)}] });
             }
-
             const btts = markets.find(m => m.name && m.name.toLowerCase().includes('both teams to score'));
             if (btts && btts.odds && btts.odds.length > 0) {
                 if (btts.odds[0].yes) realOdds.push({ id: 8, values: [{value: 'Yes', odd: parseFloat(btts.odds[0].yes)}] });
             }
         }
-
         return realOdds.length > 0 ? realOdds : fallbackOdds;
     } catch (e) {
         return fallbackOdds;
@@ -241,6 +245,7 @@ function mapToAppFormat(fdMatch) {
 async function injectOdds(matches) {
     const oddsEvents = await getOddsApiEvents();
     for (let match of matches) {
+        // Proteção Odds-API Free: Não consultar odds de jogos finalizados
         if (['FT', 'AWD', 'CANC', 'SUSP', 'PST'].includes(match.fixture.status.short)) {
             match.real_odds = fallbackOdds;
             continue; 
