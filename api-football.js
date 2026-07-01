@@ -11,31 +11,30 @@ const Cache = mongoose.models.Cache || mongoose.model('Cache', CacheSchema);
 const FD_API_KEY = process.env.FOOTBALL_DATA_KEY;
 const ODDS_API_KEY = process.env.ODDS_API_KEY;
 
-// Alerta de Segurança no Terminal
 if (!FD_API_KEY || !ODDS_API_KEY) {
     console.error("🚨 ATENÇÃO: As chaves FOOTBALL_DATA_KEY ou ODDS_API_KEY estão faltando no arquivo .env!");
 }
 
 // ==========================================
-// MOCK DATA DE EMERGÊNCIA (EVITA TELA VAZIA)
+// MOCK DATA (Evita Tela Vazia em caso de Queda)
 // ==========================================
 function getMockMatches() {
     const today = new Date();
     const yesterday = new Date(Date.now() - 86400000);
     return [
-        { // Jogo de Hoje Simulando
+        { 
             id: 9991, utcDate: new Date(today.getTime() + 7200000).toISOString(), status: 'SCHEDULED',
             homeTeam: { name: 'Brazil', crest: 'https://crests.football-data.org/764.svg' },
             awayTeam: { name: 'France', crest: 'https://crests.football-data.org/773.svg' },
             score: { fullTime: { home: null, away: null } }
         },
-        { // Histórico: Inglaterra x Congo (Arrumei o Placar pra 2x1)
+        { 
             id: 9992, utcDate: new Date(yesterday.getTime()).toISOString(), status: 'FINISHED',
             homeTeam: { name: 'England', crest: 'https://crests.football-data.org/770.svg' },
             awayTeam: { name: 'Congo DR', crest: 'https://upload.wikimedia.org/wikipedia/commons/a/ac/No_image_available.svg' },
             score: { fullTime: { home: 2, away: 1 } }
         },
-        { // Histórico: México x Equador
+        { 
             id: 9993, utcDate: new Date(yesterday.getTime()).toISOString(), status: 'FINISHED',
             homeTeam: { name: 'Mexico', crest: 'https://crests.football-data.org/769.svg' },
             awayTeam: { name: 'Ecuador', crest: 'https://upload.wikimedia.org/wikipedia/commons/a/ac/No_image_available.svg' },
@@ -51,7 +50,7 @@ const fallbackOdds = [
 ];
 
 // ==========================================
-// FUNÇÃO CENTRAL COM ANTI-CRASH
+// FUNÇÃO CENTRAL COM PROTEÇÃO DE BANCO DE DADOS
 // ==========================================
 async function fetchWithCache(endpoint, fetchFunction, customTTL, fallbackData) {
     let cached = null;
@@ -66,26 +65,36 @@ async function fetchWithCache(endpoint, fetchFunction, customTTL, fallbackData) 
         console.log(`📡 BUSCANDO API: ${endpoint}`);
         const rData = await fetchFunction();
         
-        if (cached) { cached.data = rData; cached.lastUpdated = now; await cached.save(); } 
-        else { await Cache.create({ endpoint, data: rData }); }
+        // CORREÇÃO DO ERRO DO MONGODB (E11000): 
+        // Usamos updateOne com upsert:true. Isso impede colisões quando muitos acessam ao mesmo tempo!
+        await Cache.updateOne(
+            { endpoint: endpoint },
+            { $set: { data: rData, lastUpdated: now } },
+            { upsert: true }
+        );
+
         return rData;
     } catch (err) {
         console.error(`🚨 ERRO API [${endpoint}]:`, err.response ? err.response.status : err.message);
-        if (cached && cached.data) return cached.data; // Tenta salvar usando o cache antigo
+        if (cached && cached.data) return cached.data; 
         console.warn(`⚠️ API BLOQUEADA! INJETANDO DADOS DE EMERGÊNCIA (MOCK) EM: ${endpoint}`);
-        return fallbackData; // Se tudo falhar, joga dados falsos para o App não morrer visualmente
+        return fallbackData; 
     }
 }
 
 // ==========================================
 // 1. DADOS DAS PARTIDAS (FOOTBALL-DATA.ORG)
 // ==========================================
-async function getMatchesData() {
-    return fetchWithCache('fd_matches_wc_all', async () => {
-        // Trocado o código '2000' para 'WC' (World Cup) para evitar o erro 400
-        const url = `https://api.football-data.org/v4/competitions/WC/matches`;
+async function getMatchesData(dateFrom, dateTo) {
+    const endpoint = `fd_matches_${dateFrom}_${dateTo}`;
+    return fetchWithCache(endpoint, async () => {
+        // CORREÇÃO DO ERRO 400: Puxamos o endpoint global que aceita free tier 100% e filtramos depois.
+        const url = `https://api.football-data.org/v4/matches?dateFrom=${dateFrom}&dateTo=${dateTo}`;
         const res = await axios.get(url, { headers: { 'X-Auth-Token': FD_API_KEY } });
-        return res.data.matches || [];
+        
+        const allMatches = res.data.matches || [];
+        // Filtramos apenas jogos da Copa do Mundo (ID 2000)
+        return allMatches.filter(m => m.competition && m.competition.id === 2000);
     }, 1 * 60 * 60 * 1000, getMockMatches()); 
 }
 
@@ -109,7 +118,6 @@ async function getOddsForEvent(eventId) {
     }, 4 * 60 * 60 * 1000, null);
 }
 
-// Tratamento de nomes e identificação cruzada
 function normalizeName(name) {
     if (!name) return ""; return name.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
@@ -130,7 +138,6 @@ function mapOddsApiIo(oddsJson) {
     const bookies = Object.keys(oddsJson.bookmakers);
     if (bookies.length === 0) return [];
     
-    // Puxa a Bet365 ou DraftKings primeiro se houver
     let targetBookie = bookies.find(b => b.toLowerCase().includes('bet365')) || bookies[0];
     const markets = oddsJson.bookmakers[targetBookie];
     if (!markets || !Array.isArray(markets)) return [];
@@ -189,7 +196,7 @@ async function injectOdds(matches) {
             const oddsData = await getOddsForEvent(eventId);
             match.real_odds = mapOddsApiIo(oddsData);
         } else {
-            match.real_odds = fallbackOdds; // Usa odds matemáticas se não encontrar o jogo na casa de aposta
+            match.real_odds = fallbackOdds;
         }
     }
     return matches;
@@ -197,7 +204,8 @@ async function injectOdds(matches) {
 
 async function getTodayMatches() {
     const dateHoje = getBrazilDateStr(new Date());
-    const rawMatches = await getMatchesData();
+    const rawMatches = await getMatchesData(dateHoje, dateHoje);
+    
     let matches = rawMatches.filter(m => getBrazilDateStr(m.utcDate) === dateHoje && !isMatchFinished(m.status)).map(mapToAppFormat);
     return await injectOdds(matches);
 }
@@ -207,8 +215,9 @@ async function getHistoryMatches() {
     const ontem = new Date(); ontem.setDate(ontem.getDate() - 1);
     const dateOntem = getBrazilDateStr(ontem);
     
-    const rawMatches = await getMatchesData();
-    let historico = rawMatches.filter(m => (getBrazilDateStr(m.utcDate) === dateHoje || getBrazilDateStr(m.utcDate) === dateOntem) && isMatchFinished(m.status) && m.score?.fullTime?.home !== null);
+    // Puxamos de Ontem até Hoje
+    const rawMatches = await getMatchesData(dateOntem, dateHoje);
+    let historico = rawMatches.filter(m => isMatchFinished(m.status) && m.score?.fullTime?.home !== null);
     
     historico = historico.map(mapToAppFormat);
     historico.sort((a,b) => b.fixture.timestamp - a.fixture.timestamp);
@@ -216,8 +225,13 @@ async function getHistoryMatches() {
 }
 
 async function getPredictions(id) {
-    const rawMatches = await getMatchesData();
+    const dateHoje = getBrazilDateStr(new Date());
+    const ontem = new Date(); ontem.setDate(ontem.getDate() - 1);
+    const dateOntem = getBrazilDateStr(ontem);
+    
+    const rawMatches = await getMatchesData(dateOntem, dateHoje);
     const fdMatch = rawMatches.find(m => m.id.toString() === id.toString());
+    
     if (!fdMatch) return [];
 
     let mapped = mapToAppFormat(fdMatch);
