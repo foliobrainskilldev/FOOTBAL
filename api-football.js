@@ -16,7 +16,7 @@ if (!FD_API_KEY || !ODDS_API_KEY) {
 }
 
 // ==========================================
-// MOCK DATA (Evita Tela Vazia em caso de Queda)
+// MOCK DATA DE EMERGÊNCIA (EVITA TELA VAZIA)
 // ==========================================
 function getMockMatches() {
     const today = new Date();
@@ -50,7 +50,7 @@ const fallbackOdds = [
 ];
 
 // ==========================================
-// FUNÇÃO CENTRAL COM PROTEÇÃO DE BANCO DE DADOS
+// FUNÇÃO CENTRAL COM PROTEÇÃO 100% BLINDADA
 // ==========================================
 async function fetchWithCache(endpoint, fetchFunction, customTTL, fallbackData) {
     let cached = null;
@@ -66,12 +66,21 @@ async function fetchWithCache(endpoint, fetchFunction, customTTL, fallbackData) 
         const rData = await fetchFunction();
         
         // CORREÇÃO DO ERRO DO MONGODB (E11000): 
-        // Usamos updateOne com upsert:true. Isso impede colisões quando muitos acessam ao mesmo tempo!
-        await Cache.updateOne(
-            { endpoint: endpoint },
-            { $set: { data: rData, lastUpdated: now } },
-            { upsert: true }
-        );
+        // Usamos updateOne com upsert:true e tratamento de exceção silencioso.
+        // Impede colisões quando muitos acessam ao mesmo tempo!
+        try {
+            await Cache.updateOne(
+                { endpoint: endpoint },
+                { $set: { data: rData, lastUpdated: now } },
+                { upsert: true }
+            );
+        } catch (dbErr) {
+            if (dbErr.code === 11000) {
+                console.log(`⚡ [DB] Ignorando colisão no cache para: ${endpoint}`);
+            } else {
+                console.error(`🚨 ERRO DB [${endpoint}]:`, dbErr.message);
+            }
+        }
 
         return rData;
     } catch (err) {
@@ -85,16 +94,13 @@ async function fetchWithCache(endpoint, fetchFunction, customTTL, fallbackData) 
 // ==========================================
 // 1. DADOS DAS PARTIDAS (FOOTBALL-DATA.ORG)
 // ==========================================
-async function getMatchesData(dateFrom, dateTo) {
-    const endpoint = `fd_matches_${dateFrom}_${dateTo}`;
+async function getMatchesData() {
+    // CORREÇÃO DO ERRO 400: Retiramos o DateFrom/DateTo e puxamos tudo de uma vez.
+    const endpoint = `fd_matches_wc_all`;
     return fetchWithCache(endpoint, async () => {
-        // CORREÇÃO DO ERRO 400: Puxamos o endpoint global que aceita free tier 100% e filtramos depois.
-        const url = `https://api.football-data.org/v4/matches?dateFrom=${dateFrom}&dateTo=${dateTo}`;
+        const url = `https://api.football-data.org/v4/competitions/2000/matches`;
         const res = await axios.get(url, { headers: { 'X-Auth-Token': FD_API_KEY } });
-        
-        const allMatches = res.data.matches || [];
-        // Filtramos apenas jogos da Copa do Mundo (ID 2000)
-        return allMatches.filter(m => m.competition && m.competition.id === 2000);
+        return res.data.matches || [];
     }, 1 * 60 * 60 * 1000, getMockMatches()); 
 }
 
@@ -112,7 +118,8 @@ async function getOddsApiEvents() {
 async function getOddsForEvent(eventId) {
     if (!eventId) return null;
     return fetchWithCache(`odds_api_match_${eventId}`, async () => {
-        const url = `https://api.odds-api.io/v3/odds?apiKey=${ODDS_API_KEY}&eventId=${eventId}`;
+        // CORREÇÃO DO ERRO 400 (Odds API): Obrigatório incluir as casas de aposta (?bookmakers) na URL
+        const url = `https://api.odds-api.io/v3/odds?apiKey=${ODDS_API_KEY}&eventId=${eventId}&bookmakers=bet365,draftkings,williamhill,bwin`;
         const res = await axios.get(url);
         return res.data;
     }, 4 * 60 * 60 * 1000, null);
@@ -134,13 +141,13 @@ function findEventId(oddsEvents, homeName, awayName) {
 }
 
 function mapOddsApiIo(oddsJson) {
-    if (!oddsJson || !oddsJson.bookmakers) return [];
+    if (!oddsJson || !oddsJson.bookmakers) return fallbackOdds;
     const bookies = Object.keys(oddsJson.bookmakers);
-    if (bookies.length === 0) return [];
+    if (bookies.length === 0) return fallbackOdds;
     
     let targetBookie = bookies.find(b => b.toLowerCase().includes('bet365')) || bookies[0];
     const markets = oddsJson.bookmakers[targetBookie];
-    if (!markets || !Array.isArray(markets)) return [];
+    if (!markets || !Array.isArray(markets)) return fallbackOdds;
 
     const realOdds = [];
 
@@ -172,7 +179,10 @@ function isMatchFinished(status) {
 }
 
 function getBrazilDateStr(utcDateString) {
-    return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(utcDateString));
+    try {
+        if (!utcDateString) return "";
+        return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(utcDateString));
+    } catch(e) { return ""; }
 }
 
 function mapToAppFormat(fdMatch) {
@@ -204,8 +214,9 @@ async function injectOdds(matches) {
 
 async function getTodayMatches() {
     const dateHoje = getBrazilDateStr(new Date());
-    const rawMatches = await getMatchesData(dateHoje, dateHoje);
+    const rawMatches = await getMatchesData(); 
     
+    // Filtro no Backend: Só puxamos da matriz inteira os jogos de hoje!
     let matches = rawMatches.filter(m => getBrazilDateStr(m.utcDate) === dateHoje && !isMatchFinished(m.status)).map(mapToAppFormat);
     return await injectOdds(matches);
 }
@@ -215,9 +226,8 @@ async function getHistoryMatches() {
     const ontem = new Date(); ontem.setDate(ontem.getDate() - 1);
     const dateOntem = getBrazilDateStr(ontem);
     
-    // Puxamos de Ontem até Hoje
-    const rawMatches = await getMatchesData(dateOntem, dateHoje);
-    let historico = rawMatches.filter(m => isMatchFinished(m.status) && m.score?.fullTime?.home !== null);
+    const rawMatches = await getMatchesData(); 
+    let historico = rawMatches.filter(m => (getBrazilDateStr(m.utcDate) === dateHoje || getBrazilDateStr(m.utcDate) === dateOntem) && isMatchFinished(m.status) && m.score?.fullTime?.home !== null);
     
     historico = historico.map(mapToAppFormat);
     historico.sort((a,b) => b.fixture.timestamp - a.fixture.timestamp);
@@ -225,11 +235,7 @@ async function getHistoryMatches() {
 }
 
 async function getPredictions(id) {
-    const dateHoje = getBrazilDateStr(new Date());
-    const ontem = new Date(); ontem.setDate(ontem.getDate() - 1);
-    const dateOntem = getBrazilDateStr(ontem);
-    
-    const rawMatches = await getMatchesData(dateOntem, dateHoje);
+    const rawMatches = await getMatchesData(); 
     const fdMatch = rawMatches.find(m => m.id.toString() === id.toString());
     
     if (!fdMatch) return [];
