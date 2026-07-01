@@ -65,7 +65,6 @@ async function fetchWithCache(endpoint, fetchFunction, customTTL, fallbackData) 
         console.log(`📡 BUSCANDO API: ${endpoint}`);
         const rData = await fetchFunction();
         
-        // CORREÇÃO DO ERRO DO MONGODB (E11000)
         try {
             await Cache.updateOne(
                 { endpoint: endpoint },
@@ -73,11 +72,7 @@ async function fetchWithCache(endpoint, fetchFunction, customTTL, fallbackData) 
                 { upsert: true }
             );
         } catch (dbErr) {
-            if (dbErr.code === 11000) {
-                console.log(`⚡ [DB] Ignorando colisão no cache para: ${endpoint}`);
-            } else {
-                console.error(`🚨 ERRO DB [${endpoint}]:`, dbErr.message);
-            }
+            if (dbErr.code === 11000) console.log(`⚡ [DB] Ignorando colisão no cache para: ${endpoint}`);
         }
 
         return rData;
@@ -95,13 +90,9 @@ async function fetchWithCache(endpoint, fetchFunction, customTTL, fallbackData) 
 async function getMatchesData() {
     const endpoint = `fd_matches_wc_all`;
     return fetchWithCache(endpoint, async () => {
-        // CORREÇÃO DO ERRO 400: Filtramos a busca pela rota principal (/v4/matches) limitando as datas
-        // Isso evita que a API bloqueie a requisição tentando trazer toda a competição de uma vez.
-        const today = new Date();
-        const dateFrom = new Date(today.getTime() - 3 * 86400000).toISOString().split('T')[0];
-        const dateTo = new Date(today.getTime() + 3 * 86400000).toISOString().split('T')[0];
-        
-        const url = `https://api.football-data.org/v4/matches?competitions=2000&dateFrom=${dateFrom}&dateTo=${dateTo}`;
+        // CORREÇÃO DO ERRO 400: Adicionado ?season=2026. Impede que a API tente 
+        // cuspir todo o histórico desde 1930 (o que estoura o limite da Free Tier)
+        const url = `https://api.football-data.org/v4/competitions/2000/matches?season=2026`;
         const res = await axios.get(url, { headers: { 'X-Auth-Token': FD_API_KEY } });
         return res.data.matches || [];
     }, 1 * 60 * 60 * 1000, getMockMatches()); 
@@ -121,8 +112,8 @@ async function getOddsApiEvents() {
 async function getOddsForEvent(eventId) {
     if (!eventId) return null;
     return fetchWithCache(`odds_api_match_${eventId}`, async () => {
-        // CORREÇÃO DO ERRO 400: Passar os nomes das casas de apostas respeitando letras maiúsculas/minúsculas 
-        const url = `https://api.odds-api.io/v3/odds?apiKey=${ODDS_API_KEY}&eventId=${eventId}&bookmakers=Bet365,DraftKings,Betfair`;
+        // Buscamos a ODD puramente pelo EventID, sem filtros estritos, para evitar erros 
+        const url = `https://api.odds-api.io/v3/odds?apiKey=${ODDS_API_KEY}&eventId=${eventId}`;
         const res = await axios.get(url);
         return res.data;
     }, 4 * 60 * 60 * 1000, null);
@@ -144,37 +135,39 @@ function findEventId(oddsEvents, homeName, awayName) {
 }
 
 function mapOddsApiIo(oddsJson) {
-    if (!oddsJson || !oddsJson.bookmakers) return fallbackOdds;
+    if (!oddsJson) return fallbackOdds;
     
     try {
         let bookies = [];
         
-        // Híbrido: Suporta caso a API retorne um Array ou um Objeto
-        if (Array.isArray(oddsJson.bookmakers)) {
-            bookies = oddsJson.bookmakers;
-        } else {
-            const keys = Object.keys(oddsJson.bookmakers);
-            if (keys.length === 0) return fallbackOdds;
-            keys.forEach(k => {
-                bookies.push({ key: k, markets: oddsJson.bookmakers[k] });
-            });
+        if (oddsJson.bookmakers) {
+            if (Array.isArray(oddsJson.bookmakers)) {
+                bookies = oddsJson.bookmakers;
+            } else {
+                const keys = Object.keys(oddsJson.bookmakers);
+                if (keys.length === 0) return fallbackOdds;
+                keys.forEach(k => { bookies.push({ key: k, markets: oddsJson.bookmakers[k] }); });
+            }
+        } else if (Array.isArray(oddsJson)) {
+            bookies = oddsJson;
         }
 
-        let targetBookie = bookies.find(b => b.key.toLowerCase().includes('bet365')) || bookies[0];
-        let markets = targetBookie.markets;
+        if (bookies.length === 0) return fallbackOdds;
+
+        let targetBookie = bookies.find(b => {
+            const name = (b.key || b.bookmaker || b.name || '').toLowerCase();
+            return name.includes('bet365');
+        }) || bookies[0];
         
+        let markets = targetBookie.markets || targetBookie.markets_data || targetBookie;
         if (!markets) return fallbackOdds;
 
         const realOdds = [];
 
-        // Extrai Odds dependendo do formato de resposta retornado
         if (!Array.isArray(markets)) {
-            // Formato Objeto
             if (markets.moneyline) {
                 const o = markets.moneyline;
-                if (o.home && o.away && o.draw) {
-                    realOdds.push({ id: 1, values: [{value: 'Home', odd: parseFloat(o.home)}, {value: 'Away', odd: parseFloat(o.away)}, {value: 'Draw', odd: parseFloat(o.draw)}] });
-                }
+                if (o.home && o.away && o.draw) realOdds.push({ id: 1, values: [{value: 'Home', odd: parseFloat(o.home)}, {value: 'Away', odd: parseFloat(o.away)}, {value: 'Draw', odd: parseFloat(o.draw)}] });
             }
             if (markets.totals) {
                 let totalsArr = Array.isArray(markets.totals) ? markets.totals : [markets.totals];
@@ -186,13 +179,10 @@ function mapOddsApiIo(oddsJson) {
                 if (btts && btts.yes) realOdds.push({ id: 8, values: [{value: 'Yes', odd: parseFloat(btts.yes)}] });
             }
         } else {
-            // Formato Array Tradicional
             const moneyline = markets.find(m => m.name && (m.name.toLowerCase() === 'moneyline' || m.name.toLowerCase() === 'match winner'));
             if (moneyline && moneyline.odds && moneyline.odds.length > 0) {
                 const o = moneyline.odds[0];
-                if (o.home && o.away && o.draw) {
-                    realOdds.push({ id: 1, values: [{value: 'Home', odd: parseFloat(o.home)}, {value: 'Away', odd: parseFloat(o.away)}, {value: 'Draw', odd: parseFloat(o.draw)}] });
-                }
+                if (o.home && o.away && o.draw) realOdds.push({ id: 1, values: [{value: 'Home', odd: parseFloat(o.home)}, {value: 'Away', odd: parseFloat(o.away)}, {value: 'Draw', odd: parseFloat(o.draw)}] });
             }
 
             const totals = markets.find(m => m.name && (m.name.toLowerCase() === 'totals' || m.name.toLowerCase() === 'over/under'));
@@ -209,7 +199,6 @@ function mapOddsApiIo(oddsJson) {
 
         return realOdds.length > 0 ? realOdds : fallbackOdds;
     } catch (e) {
-        console.error("🚨 ERRO NO MAPEAMENTO DE ODDS:", e.message);
         return fallbackOdds;
     }
 }
@@ -244,6 +233,15 @@ function mapToAppFormat(fdMatch) {
 async function injectOdds(matches) {
     const oddsEvents = await getOddsApiEvents();
     for (let match of matches) {
+        
+        // CORREÇÃO DO ERRO 400 DA ODDS API: 
+        // A API free não suporta buscar odds de jogos que já terminaram.
+        // Se tentarmos, ela bloqueia (400). Então pulamos e usamos os dados de mock.
+        if (['FT', 'AWD', 'CANC', 'SUSP', 'PST'].includes(match.fixture.status.short)) {
+            match.real_odds = fallbackOdds;
+            continue; 
+        }
+
         const eventId = findEventId(oddsEvents, match.teams.home.name, match.teams.away.name);
         if (eventId) {
             const oddsData = await getOddsForEvent(eventId);
