@@ -11,7 +11,11 @@ const Cache = mongoose.models.Cache || mongoose.model('Cache', CacheSchema);
 const FD_API_KEY = process.env.FOOTBALL_DATA_KEY;
 const ODDS_API_KEY = process.env.ODDS_API_KEY;
 
-// Chave da Odds-API para Copa do Mundo
+// Alerta de Segurança para o Terminal
+if (!FD_API_KEY || !ODDS_API_KEY) {
+    console.error("🚨 ATENÇÃO: As chaves FOOTBALL_DATA_KEY ou ODDS_API_KEY não foram encontradas no seu arquivo .env!");
+}
+
 const SPORT_KEY = 'soccer_fifa_world_cup'; 
 
 async function fetchWithCache(endpoint, fetchFunction, customTTL) {
@@ -37,21 +41,22 @@ async function fetchWithCache(endpoint, fetchFunction, customTTL) {
         }
         return rData;
     } catch (err) {
-        console.error(`🚨 ERRO API [${endpoint}]:`, err.message);
+        console.error(`🚨 ERRO API [${endpoint}]:`, err.response ? err.response.status : err.message);
         return cached ? cached.data : null;
     }
 }
 
-// 1. BUSCA ODD E TRADUZ PARA O SEU FORMATO
+// 1. BUSCA ODDS API
 async function getAllOdds() {
     return fetchWithCache('odds_api_wc', async () => {
         const url = `https://api.the-odds-api.com/v4/sports/${SPORT_KEY}/odds/?apiKey=${ODDS_API_KEY}&regions=eu&markets=h2h,totals,btts`;
         const res = await axios.get(url);
         return res.data;
-    }, 4 * 60 * 60 * 1000); // Salva odds por 4 horas pra poupar cota
+    }, 4 * 60 * 60 * 1000); 
 }
 
 function normalizeName(name) {
+    if (!name) return "";
     return name.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
@@ -94,15 +99,15 @@ function mapOddsForMatch(allOdds, homeName, awayName) {
     return realOdds;
 }
 
-// 2. BUSCA JOGOS E TRADUZ PARA O SEU FORMATO
-async function getMatchesData(dateFrom, dateTo) {
-    const endpoint = `fd_matches_${dateFrom}_${dateTo}`;
+// 2. BUSCA TODOS OS JOGOS DE UMA SÓ VEZ (Evita o Erro 400 de Filtro de Data)
+async function getMatchesData() {
+    const endpoint = `fd_matches_wc_all`;
     return fetchWithCache(endpoint, async () => {
-        // ID 2000 é a Copa do Mundo no Football-Data
-        const url = `https://api.football-data.org/v4/competitions/2000/matches?dateFrom=${dateFrom}&dateTo=${dateTo}`;
+        // ID 2000 é a Copa do Mundo. Sem filtros de data para não quebrar a API Gratuita.
+        const url = `https://api.football-data.org/v4/competitions/2000/matches`;
         const res = await axios.get(url, { headers: { 'X-Auth-Token': FD_API_KEY } });
         return res.data.matches || [];
-    }, 1 * 60 * 60 * 1000); // Cache de 1 hora
+    }, 1 * 60 * 60 * 1000); 
 }
 
 function isMatchFinished(status) {
@@ -124,8 +129,8 @@ function mapToAppFormat(fdMatch, allOdds) {
         },
         league: { id: 1, name: 'World Cup' }, 
         teams: {
-            home: { name: fdMatch.homeTeam.name, logo: fdMatch.homeTeam.crest || 'https://upload.wikimedia.org/wikipedia/commons/a/ac/No_image_available.svg' },
-            away: { name: fdMatch.awayTeam.name, logo: fdMatch.awayTeam.crest || 'https://upload.wikimedia.org/wikipedia/commons/a/ac/No_image_available.svg' }
+            home: { name: fdMatch.homeTeam?.name || 'TBA', logo: fdMatch.homeTeam?.crest || 'https://upload.wikimedia.org/wikipedia/commons/a/ac/No_image_available.svg' },
+            away: { name: fdMatch.awayTeam?.name || 'TBA', logo: fdMatch.awayTeam?.crest || 'https://upload.wikimedia.org/wikipedia/commons/a/ac/No_image_available.svg' }
         },
         goals: {
             home: fdMatch.score?.fullTime?.home ?? null,
@@ -137,36 +142,48 @@ function mapToAppFormat(fdMatch, allOdds) {
     return mappedMatch;
 }
 
+// Função para converter o UTC da API para a Data do Brasil
+function getBrazilDateStr(utcDateString) {
+    return new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit'
+    }).format(new Date(utcDateString));
+}
+
 async function getTodayMatches() {
-    const dateHoje = new Date().toISOString().split('T')[0];
-    const [rawMatches, allOdds] = await Promise.all([ getMatchesData(dateHoje, dateHoje), getAllOdds() ]);
+    const dateHoje = getBrazilDateStr(new Date());
+    const [rawMatches, allOdds] = await Promise.all([ getMatchesData(), getAllOdds() ]);
     
     if (!rawMatches) return [];
     
+    // O Backend faz o filtro de data internamente, blindando o erro 400!
     return rawMatches
-        .filter(m => !isMatchFinished(m.status))
+        .filter(m => getBrazilDateStr(m.utcDate) === dateHoje && !isMatchFinished(m.status))
         .map(m => mapToAppFormat(m, allOdds));
 }
 
 async function getHistoryMatches() {
-    const dateHoje = new Date().toISOString().split('T')[0];
-    const dateOntem = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+    const dateHoje = getBrazilDateStr(new Date());
+    const ontem = new Date();
+    ontem.setDate(ontem.getDate() - 1);
+    const dateOntem = getBrazilDateStr(ontem);
     
-    const [rawMatches, allOdds] = await Promise.all([ getMatchesData(dateOntem, dateHoje), getAllOdds() ]);
+    const [rawMatches, allOdds] = await Promise.all([ getMatchesData(), getAllOdds() ]);
     if (!rawMatches) return [];
     
-    let historico = rawMatches.filter(m => isMatchFinished(m.status) && m.score?.fullTime?.home !== null);
+    let historico = rawMatches.filter(m => 
+        (getBrazilDateStr(m.utcDate) === dateHoje || getBrazilDateStr(m.utcDate) === dateOntem) && 
+        isMatchFinished(m.status) && 
+        m.score?.fullTime?.home !== null
+    );
+    
     historico = historico.map(m => mapToAppFormat(m, allOdds));
     historico.sort((a,b) => b.fixture.timestamp - a.fixture.timestamp);
     
     return historico.slice(0, 15);
 }
 
-// IA MATEMÁTICA: Gera a probabilidade EXATA com base nas Odds das Casas de Aposta
 async function getPredictions(id) {
-    const dateHoje = new Date().toISOString().split('T')[0];
-    const dateOntem = new Date(Date.now() - 86400000).toISOString().split('T')[0];
-    const [rawMatches, allOdds] = await Promise.all([ getMatchesData(dateOntem, dateHoje), getAllOdds() ]);
+    const [rawMatches, allOdds] = await Promise.all([ getMatchesData(), getAllOdds() ]);
     
     const fdMatch = (rawMatches || []).find(m => m.id.toString() === id.toString());
     if (!fdMatch) return [];
