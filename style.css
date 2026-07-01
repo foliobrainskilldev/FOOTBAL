@@ -1,0 +1,17 @@
+/* Custom CSS Clean - Agora tudo usa utilitários Tailwind */
+
+/* Esconde barra de rolagem mas permite rolar, melhorando a UI Mobile */
+::-webkit-scrollbar {
+    width: 0px;
+    background: transparent;
+}
+
+/* Evita destaques azuis em toques na tela nos botões do mobile */
+* {
+    -webkit-tap-highlight-color: transparent;
+}
+
+/* Limpeza de propriedades legadas da tab (agora gerenciadas 100% pelo Tailwind) */
+.tab-content {
+    /* As classes 'hidden' e 'block' no HTML resolvem a visibilidade sem quebrar o Layout */
+}

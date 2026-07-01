@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="pt-BR" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AI Football Analytics</title>
+    
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: { sans: ['Poppins', 'sans-serif'] },
+                    colors: {
+                        bgDark: '#0f111a', cardDark: '#1a1d2d', neonGreen: '#00ff88', neonPurple: '#b300ff',
+                    },
+                    animation: { 'fade-in': 'fadeIn 0.3s ease-out' },
+                    keyframes: { fadeIn: { '0%': { opacity: '0', transform: 'translateY(5px)' }, '100%': { opacity: '1', transform: 'translateY(0)' } } }
+                }
+            }
+        }
+    </script>
+    
+    <link rel="stylesheet" href="style.css">
+    <script src="https://code.iconify.design/iconify-icon/1.0.7/iconify-icon.min.js"></script>
+</head>
+<body class="bg-gray-50 dark:bg-bgDark text-gray-900 dark:text-white transition-colors duration-300 pb-20">
+
+    <header class="flex justify-between items-center p-4 bg-gray-50 dark:bg-bgDark sticky top-0 z-40 border-b border-gray-200 dark:border-gray-800">
+        <h1 class="text-lg font-black tracking-tight" data-i18n="homeTitle">Copa 2026</h1>
+        <div class="flex items-center gap-4">
+            <button id="theme-toggle" class="text-2xl text-gray-600 dark:text-gray-300 flex outline-none"><iconify-icon icon="solar:moon-bold"></iconify-icon></button>
+            <div class="relative">
+                <button id="lang-menu-btn" class="flex items-center gap-2 bg-white dark:bg-cardDark border border-gray-200 dark:border-gray-800 px-3 py-1.5 rounded-full text-sm font-semibold outline-none">
+                    <span id="current-lang-text">PT</span>
+                    <iconify-icon id="current-lang-icon" icon="flag:br-4x3" class="text-xl rounded-full overflow-hidden"></iconify-icon>
+                    <iconify-icon icon="solar:alt-arrow-down-bold" class="text-gray-400"></iconify-icon>
+                </button>
+                <div id="lang-drawer" class="hidden absolute top-full right-0 mt-2 w-28 bg-white dark:bg-cardDark border border-gray-200 dark:border-gray-800 rounded-xl overflow-hidden z-50 shadow-lg">
+                    <div class="flex justify-between items-center px-4 py-2 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800 lang-option" data-lang="pt"><span class="text-sm font-bold">PT</span><iconify-icon icon="flag:br-4x3" class="text-xl rounded-full"></iconify-icon></div>
+                    <div class="flex justify-between items-center px-4 py-2 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800 lang-option" data-lang="en"><span class="text-sm font-bold">EN</span><iconify-icon icon="flag:gb-4x3" class="text-xl rounded-full"></iconify-icon></div>
+                    <div class="flex justify-between items-center px-4 py-2 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800 lang-option" data-lang="es"><span class="text-sm font-bold">ES</span><iconify-icon icon="flag:es-4x3" class="text-xl rounded-full"></iconify-icon></div>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="p-4 max-w-xl mx-auto" id="main-content">
+        <section id="tab-home" class="tab-content block animate-fade-in">
+            <div id="today-matches-container"></div>
+            <div class="mt-16 mb-4 relative">
+                <div class="bg-green-600 dark:bg-[#00b35e] rounded-2xl p-4 shadow-lg border border-green-500/50 flex relative h-[145px] items-center">
+                    <img src="./img-esquerda.png" alt="Promo" class="absolute bottom-0 -left-6 w-52 h-[145%] object-contain z-10 drop-shadow-md pointer-events-none">
+                    <div class="flex-1 flex flex-col justify-center relative z-10 pl-[125px] sm:pl-[140px] w-full">
+                        <p class="text-white text-left text-[0.65rem] sm:text-[0.7rem] leading-tight mb-3 font-medium w-full" data-i18n="promoCopy">
+                            Seu primeiro depósito pode valer até 5x mais.<br>Cadastre-se hoje e desbloqueie até <strong class="font-bold text-[0.8rem]">500% de bônus</strong> de boas-vindas.
+                        </p>
+                        <a href="https://w-one909485.life/v3/landing-page/football?p=68sy" target="_blank" data-i18n="promoBtn" class="self-end whitespace-nowrap px-4 py-2 rounded-xl font-bold text-[0.75rem] bg-gray-50 dark:bg-bgDark text-gray-900 dark:text-white shadow-md uppercase tracking-wider">RESGATAR BÔNUS</a>
+                    </div>
+                </div>
+                <a href="https://t.me/elplayauto" target="_blank" class="mt-3 w-full bg-[#2AABEE] text-white py-2.5 px-4 rounded-xl flex items-center justify-center gap-2 font-bold text-[0.8rem] shadow-md uppercase tracking-wide">
+                    <iconify-icon icon="ic:baseline-telegram" class="text-xl"></iconify-icon>
+                    <span data-i18n="telegramBtn">PARTICIPE DA NOSSA COMUNIDADE</span>
+                </a>
+            </div>
+        </section>
+
+        <section id="tab-history" class="tab-content hidden animate-fade-in">
+            <div id="history-matches-container"></div>
+        </section>
+    </main>
+
+    <nav class="fixed bottom-0 left-0 w-full h-16 bg-white dark:bg-[#141622] border-t border-gray-200 dark:border-gray-800 flex justify-around items-center z-40">
+        <a href="#" class="nav-item active flex flex-col items-center gap-1 text-green-600 dark:text-neonGreen text-xs font-bold" data-target="tab-home"><iconify-icon icon="solar:home-2-bold" class="text-2xl"></iconify-icon><span data-i18n="tabHome">Hoje</span></a>
+        <a href="#" class="nav-item flex flex-col items-center gap-1 text-gray-400 text-xs font-bold" data-target="tab-history"><iconify-icon icon="solar:history-bold" class="text-2xl"></iconify-icon><span data-i18n="tabHistory">Histórico</span></a>
+    </nav>
+
+    <div id="video-modal" class="fixed inset-0 bg-black/95 hidden flex justify-center items-center p-4 z-50">
+        <div class="w-full max-w-sm flex flex-col items-center relative">
+            <div class="w-full bg-gray-900 border border-gray-700 border-b-0 rounded-t-xl px-3 py-2.5 flex items-center justify-center relative shadow-lg z-10">
+                <div class="text-[0.7rem] sm:text-[0.75rem] font-bold text-white text-center flex items-center gap-1">
+                    <span id="timer-text-label" data-i18n="timeUntilPrediction">Tempo até o palpite:</span>
+                    <span id="video-timer" class="text-neonGreen font-black">00:00</span>
+                </div>
+                <button class="close-modal absolute right-3 text-gray-400 hover:text-white text-xl outline-none transition-colors"><iconify-icon icon="solar:close-circle-bold"></iconify-icon></button>
+            </div>
+            <video id="promo-video" src="./promo-video.mp4" class="w-full rounded-b-xl shadow-2xl bg-black" playsinline controls></video>
+            <button id="btn-video-bonus" class="hidden mt-6 w-full py-4 text-center rounded-xl font-bold text-[0.95rem] bg-white text-gray-900 shadow-xl"><span data-i18n="btnGetBonusNow">Clique aqui e resgate seu bônus de 500%.</span></button>
+        </div>
+    </div>
+
+    <div id="prediction-modal" class="fixed inset-0 bg-black/90 hidden flex justify-center items-center p-4 z-50 overflow-y-auto">
+        <div class="bg-white dark:bg-cardDark p-5 rounded-2xl w-full max-w-sm relative border border-gray-200 dark:border-gray-800 my-auto">
+            <button class="close-modal absolute top-3 right-3 text-gray-400 hover:text-gray-600 dark:hover:text-white text-2xl outline-none z-10"><iconify-icon icon="solar:close-circle-bold"></iconify-icon></button>
+            <div id="prediction-data" class="mt-2"></div>
+        </div>
+    </div>
+
+    <script src="app-novo.js?v=16.0"></script>
+</body>
+</html>
