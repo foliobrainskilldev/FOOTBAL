@@ -64,40 +64,29 @@ async function fetchWithCache(endpoint) {
 const WORLD_CUP_LEAGUE_ID = 1;
 
 async function getTodayMatches() {
-    let jogosFuturosDisponiveis = [];
-
-    // Tenta buscar jogos nos próximos 3 dias (Hoje, Amanhã e Depois)
-    for (let i = 0; i < 3; i++) {
-        // Cria a data adicionando os dias (0 = Hoje, 1 = Amanhã, 2 = Depois)
-        const dataBusca = new Date();
-        dataBusca.setDate(dataBusca.getDate() + i);
-        
-        const dateStr = new Intl.DateTimeFormat('en-CA', {
-            timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit'
-        }).format(dataBusca); 
-        
-        const endpoint = `/fixtures?date=${dateStr}&timezone=America/Sao_Paulo`;
-        let todosOsJogos = await fetchWithCache(endpoint);
-
-        if(todosOsJogos && todosOsJogos.length > 0) {
-            // Filtra os jogos da Copa do Mundo
-            let jogosCopa = todosOsJogos.filter(jogo => jogo.league && jogo.league.id === WORLD_CUP_LEAGUE_ID);
-            
-            // 🔥 Filtra apenas os que AINDA NÃO ACABARAM (NS = Not Started, LIVE, etc)
-            jogosCopa = jogosCopa.filter(jogo => {
-                const status = jogo.fixture?.status?.short;
-                return !['FT', 'AET', 'PEN', 'CANC', 'PST', 'ABD'].includes(status);
-            });
-
-            // Se achou pelo menos 1 jogo futuro ou ao vivo nesse dia, para de procurar e mostra ele na tela!
-            if (jogosCopa.length > 0) {
-                jogosFuturosDisponiveis = jogosCopa;
-                break; 
-            }
-        }
-    }
+    // Pega ESTRITAMENTE a data de hoje no fuso horário do Brasil
+    const dateHojeBRT = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit'
+    }).format(new Date()); 
     
-    return jogosFuturosDisponiveis;
+    const endpoint = `/fixtures?date=${dateHojeBRT}&timezone=America/Sao_Paulo`;
+    let todosOsJogosDoDia = await fetchWithCache(endpoint);
+
+    // Se não tiver jogos no dia, retorna vazio (Aba hoje fica sem jogos até dar 00:00)
+    if(!todosOsJogosDoDia || todosOsJogosDoDia.length === 0) return [];
+
+    // Filtra os jogos da Copa do Mundo
+    let jogosCopaHoje = todosOsJogosDoDia.filter(jogo => jogo.league && jogo.league.id === WORLD_CUP_LEAGUE_ID);
+    
+    // 🔥 MANTÉM NA ABA HOJE APENAS: Jogos que ainda não aconteceram ou estão rolando AGORA.
+    // Assim que o juiz apitar o final (FT, AET, PEN), ele some daqui e vai pro histórico.
+    jogosCopaHoje = jogosCopaHoje.filter(jogo => {
+        const status = jogo.fixture?.status?.short;
+        // Exclui os finalizados/cancelados. Mantém NS (Não iniciado), TBD, e os do Ao Vivo (1H, 2H, HT, LIVE).
+        return !['FT', 'AET', 'PEN', 'CANC', 'PST', 'ABD'].includes(status);
+    });
+    
+    return jogosCopaHoje;
 }
 
 async function getHistoryMatches() {
