@@ -8,164 +8,200 @@ const CacheSchema = new mongoose.Schema({
 });
 const Cache = mongoose.models.Cache || mongoose.model('Cache', CacheSchema);
 
-const API_KEY = process.env.API_FOOTBALL_KEY;
-const BASE_URL = 'https://v3.football.api-sports.io';
+const FD_API_KEY = process.env.FOOTBALL_DATA_KEY;
+const ODDS_API_KEY = process.env.ODDS_API_KEY;
 
-const apiClient = axios.create({
-    baseURL: BASE_URL,
-    headers: { 'x-apisports-key': API_KEY }
-});
+// Chave da Odds-API para Copa do Mundo
+const SPORT_KEY = 'soccer_fifa_world_cup'; 
 
-// A Função agora aceita "checkStuckGames". Se for ativado, ela procura ativamente por placares falsos!
-async function fetchWithCache(endpoint, customTTL, checkStuckGames = false) {
+async function fetchWithCache(endpoint, fetchFunction, customTTL) {
     let cached = null;
     try { cached = await Cache.findOne({ endpoint }); } catch (e) {}
     const now = new Date();
     
-    let needsRefresh = false;
-
     if (cached && (now - cached.lastUpdated < customTTL)) {
-        // AUTO-CURA: Verifica se há algum jogo salvo no cache com placar preso
-        if (checkStuckGames && cached.data && Array.isArray(cached.data)) {
-            const hasStuckGame = cached.data.some(jogo => {
-                const status = jogo.fixture?.status?.short;
-                // Status de jogos que realmente acabaram
-                const isFinished = ['FT', 'AET', 'PEN', 'CANC', 'PST', 'ABD', 'AWD', 'WO'].includes(status);
-                
-                // Pega a hora exata agora e compara com a hora que o jogo começou
-                const timeElapsedSeconds = Math.floor(Date.now() / 1000) - jogo.fixture?.timestamp;
-                
-                // SE o jogo não tem status de finalizado (ex: 1H, 2H, HT, etc)... 
-                // E já se passaram mais de 3 HORAS desde o início da partida
-                // ENTÃO ESTE CACHE ESTÁ PRESO! PRECISA SER ATUALIZADO.
-                return (!isFinished && timeElapsedSeconds > 3 * 60 * 60);
-            });
-            
-            if (hasStuckGame) {
-                console.log(`🧹 CACHE PRESO DETECTADO: Ignorando o cache antigo e forçando atualização em ${endpoint}`);
-                needsRefresh = true;
-            }
-        }
-
-        // Se não precisa de refresh forçado, usa a memória rápida normal.
-        if (!needsRefresh && !(Array.isArray(cached.data) && cached.data.length === 0)) {
-            console.log(`⚡ RETORNANDO DO CACHE: ${endpoint}`);
-            return cached.data;
-        }
+        console.log(`⚡ CACHE: ${endpoint}`);
+        return cached.data;
     }
     
     try {
-        console.log(`📡 BUSCANDO NA API-SPORTS: ${endpoint}`);
-        const res = await apiClient.get(endpoint);
+        console.log(`📡 BUSCANDO API: ${endpoint}`);
+        const rData = await fetchFunction();
         
-        if (res.data.errors && Object.keys(res.data.errors).length > 0) {
-            console.error(`🚨 ERRO NA API [${endpoint}]:`, res.data.errors);
-            // Se faltar crédito, ele salva o app usando o cache antigo mesmo que esteja preso
-            if (cached && cached.data && cached.data.length > 0) return cached.data;
-            return []; 
+        if (cached) {
+            cached.data = rData;
+            cached.lastUpdated = now;
+            await cached.save();
+        } else {
+            await Cache.create({ endpoint, data: rData });
         }
-
-        const rData = res.data.response;
-        
-        if (rData && rData.length > 0) {
-            if (cached) {
-                cached.data = rData;
-                cached.lastUpdated = now;
-                await cached.save();
-            } else {
-                await Cache.create({ endpoint, data: rData });
-            }
-        }
-        return rData || [];
+        return rData;
     } catch (err) {
-        if (cached && cached.data && cached.data.length > 0) return cached.data;
-        return [];
+        console.error(`🚨 ERRO API [${endpoint}]:`, err.message);
+        return cached ? cached.data : null;
     }
 }
 
-async function getRealOdds(fixtureId, ttl) {
-    const oddsData = await fetchWithCache(`/odds?fixture=${fixtureId}`, ttl);
-    if (!oddsData || oddsData.length === 0) return null;
-
-    const bookmakers = oddsData[0].bookmakers;
-    if (!bookmakers || bookmakers.length === 0) return null;
-
-    return bookmakers[0].bets;
+// 1. BUSCA ODD E TRADUZ PARA O SEU FORMATO
+async function getAllOdds() {
+    return fetchWithCache('odds_api_wc', async () => {
+        const url = `https://api.the-odds-api.com/v4/sports/${SPORT_KEY}/odds/?apiKey=${ODDS_API_KEY}&regions=eu&markets=h2h,totals,btts`;
+        const res = await axios.get(url);
+        return res.data;
+    }, 4 * 60 * 60 * 1000); // Salva odds por 4 horas pra poupar cota
 }
 
-const WORLD_CUP_LEAGUE_ID = 1; // 1 = Copa do Mundo
+function normalizeName(name) {
+    return name.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
 
-function isMatchFinished(jogo) {
-    const status = jogo.fixture?.status?.short;
-    if (['FT', 'AET', 'PEN', 'CANC', 'PST', 'ABD', 'AWD', 'WO'].includes(status)) return true;
-    const timeElapsedSeconds = Math.floor(Date.now() / 1000) - jogo.fixture.timestamp;
-    if (timeElapsedSeconds > 4 * 60 * 60) return true;
-    return false;
+function mapOddsForMatch(allOdds, homeName, awayName) {
+    if (!allOdds || !allOdds.length) return [];
+    
+    const hN = normalizeName(homeName);
+    const aN = normalizeName(awayName);
+    
+    const oddData = allOdds.find(o => 
+        (normalizeName(o.home_team).includes(hN) || hN.includes(normalizeName(o.home_team))) ||
+        (normalizeName(o.away_team).includes(aN) || aN.includes(normalizeName(o.away_team)))
+    );
+
+    if (!oddData || !oddData.bookmakers || !oddData.bookmakers.length) return [];
+    
+    const markets = oddData.bookmakers[0].markets;
+    const realOdds = [];
+
+    const h2h = markets.find(m => m.key === 'h2h');
+    if (h2h) {
+        const h = h2h.outcomes.find(o => o.name === oddData.home_team)?.price || 0;
+        const a = h2h.outcomes.find(o => o.name === oddData.away_team)?.price || 0;
+        const d = h2h.outcomes.find(o => o.name === 'Draw')?.price || 0;
+        realOdds.push({ id: 1, values: [{value: 'Home', odd: h}, {value: 'Away', odd: a}, {value: 'Draw', odd: d}] });
+    }
+
+    const totals = markets.find(m => m.key === 'totals');
+    if (totals) {
+        const under = totals.outcomes.find(o => o.name.toLowerCase() === 'under' && o.point === 2.5)?.price || 0;
+        if (under) realOdds.push({ id: 5, values: [{value: 'Under 2.5', odd: under}] });
+    }
+
+    const btts = markets.find(m => m.key === 'btts');
+    if (btts) {
+        const yes = btts.outcomes.find(o => o.name.toLowerCase() === 'yes')?.price || 0;
+        if (yes) realOdds.push({ id: 8, values: [{value: 'Yes', odd: yes}] });
+    }
+
+    return realOdds;
+}
+
+// 2. BUSCA JOGOS E TRADUZ PARA O SEU FORMATO
+async function getMatchesData(dateFrom, dateTo) {
+    const endpoint = `fd_matches_${dateFrom}_${dateTo}`;
+    return fetchWithCache(endpoint, async () => {
+        // ID 2000 é a Copa do Mundo no Football-Data
+        const url = `https://api.football-data.org/v4/competitions/2000/matches?dateFrom=${dateFrom}&dateTo=${dateTo}`;
+        const res = await axios.get(url, { headers: { 'X-Auth-Token': FD_API_KEY } });
+        return res.data.matches || [];
+    }, 1 * 60 * 60 * 1000); // Cache de 1 hora
+}
+
+function isMatchFinished(status) {
+    return ['FINISHED', 'AWARDED', 'CANCELLED'].includes(status);
+}
+
+function mapToAppFormat(fdMatch, allOdds) {
+    const statusMap = {
+        'SCHEDULED': 'NS', 'TIMED': 'NS', 'IN_PLAY': 'LIVE', 'PAUSED': 'HT',
+        'FINISHED': 'FT', 'SUSPENDED': 'SUSP', 'POSTPONED': 'PST', 'CANCELLED': 'CANC', 'AWARDED': 'AWD'
+    };
+
+    const mappedMatch = {
+        fixture: {
+            id: fdMatch.id,
+            date: fdMatch.utcDate,
+            timestamp: new Date(fdMatch.utcDate).getTime() / 1000,
+            status: { short: statusMap[fdMatch.status] || fdMatch.status }
+        },
+        league: { id: 1, name: 'World Cup' }, 
+        teams: {
+            home: { name: fdMatch.homeTeam.name, logo: fdMatch.homeTeam.crest || 'https://upload.wikimedia.org/wikipedia/commons/a/ac/No_image_available.svg' },
+            away: { name: fdMatch.awayTeam.name, logo: fdMatch.awayTeam.crest || 'https://upload.wikimedia.org/wikipedia/commons/a/ac/No_image_available.svg' }
+        },
+        goals: {
+            home: fdMatch.score?.fullTime?.home ?? null,
+            away: fdMatch.score?.fullTime?.away ?? null
+        }
+    };
+
+    mappedMatch.real_odds = mapOddsForMatch(allOdds, mappedMatch.teams.home.name, mappedMatch.teams.away.name);
+    return mappedMatch;
 }
 
 async function getTodayMatches() {
-    const dateHojeBRT = new Intl.DateTimeFormat('en-CA', {
-        timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit'
-    }).format(new Date()); 
+    const dateHoje = new Date().toISOString().split('T')[0];
+    const [rawMatches, allOdds] = await Promise.all([ getMatchesData(dateHoje, dateHoje), getAllOdds() ]);
     
-    // Passando o "true" no final para ativar a faxina automática do cache!
-    let todosOsJogos = await fetchWithCache(`/fixtures?date=${dateHojeBRT}&timezone=America/Sao_Paulo`, 1 * 60 * 60 * 1000, true);
-    if(!todosOsJogos || todosOsJogos.length === 0) return [];
-
-    let jogosCopaHoje = todosOsJogos.filter(jogo => jogo.league && jogo.league.id === WORLD_CUP_LEAGUE_ID);
-    jogosCopaHoje = jogosCopaHoje.filter(jogo => !isMatchFinished(jogo));
+    if (!rawMatches) return [];
     
-    const matchesWithOdds = await Promise.all(jogosCopaHoje.map(async (jogo) => {
-        const matchStarted = Math.floor(Date.now() / 1000) > jogo.fixture.timestamp;
-        const ttl = matchStarted ? (30 * 24 * 60 * 60 * 1000) : (2 * 60 * 60 * 1000);
-        const odds = await getRealOdds(jogo.fixture.id, ttl);
-        return { ...jogo, real_odds: odds };
-    }));
-
-    return matchesWithOdds;
+    return rawMatches
+        .filter(m => !isMatchFinished(m.status))
+        .map(m => mapToAppFormat(m, allOdds));
 }
 
 async function getHistoryMatches() {
-    const dateHojeBRT = new Intl.DateTimeFormat('en-CA', {
-        timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit'
-    }).format(new Date()); 
-
-    const ontem = new Date();
-    ontem.setDate(ontem.getDate() - 1);
-    const dateOntemBRT = new Intl.DateTimeFormat('en-CA', {
-        timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit'
-    }).format(ontem);
-
-    // Passando o "true" no final para ativar a faxina automática!
-    const [jogosHoje, jogosOntem] = await Promise.all([
-        fetchWithCache(`/fixtures?date=${dateHojeBRT}&timezone=America/Sao_Paulo`, 1 * 60 * 60 * 1000, true),
-        fetchWithCache(`/fixtures?date=${dateOntemBRT}&timezone=America/Sao_Paulo`, 1 * 60 * 60 * 1000, true)
-    ]);
-
-    let todosJogos = [...(jogosHoje || []), ...(jogosOntem || [])];
-    let historicoCopa = todosJogos.filter(jogo => jogo.league && jogo.league.id === WORLD_CUP_LEAGUE_ID);
+    const dateHoje = new Date().toISOString().split('T')[0];
+    const dateOntem = new Date(Date.now() - 86400000).toISOString().split('T')[0];
     
-    historicoCopa = historicoCopa.filter(jogo => isMatchFinished(jogo) && jogo.goals && jogo.goals.home !== null);
-    historicoCopa.sort((a,b) => b.fixture.timestamp - a.fixture.timestamp);
+    const [rawMatches, allOdds] = await Promise.all([ getMatchesData(dateOntem, dateHoje), getAllOdds() ]);
+    if (!rawMatches) return [];
     
-    const jogosCortados = historicoCopa.slice(0, 15);
-
-    const matchesWithOdds = await Promise.all(jogosCortados.map(async (jogo) => {
-        const odds = await getRealOdds(jogo.fixture.id, 30 * 24 * 60 * 60 * 1000);
-        return { ...jogo, real_odds: odds };
-    }));
+    let historico = rawMatches.filter(m => isMatchFinished(m.status) && m.score?.fullTime?.home !== null);
+    historico = historico.map(m => mapToAppFormat(m, allOdds));
+    historico.sort((a,b) => b.fixture.timestamp - a.fixture.timestamp);
     
-    return matchesWithOdds;
+    return historico.slice(0, 15);
 }
 
+// IA MATEMÁTICA: Gera a probabilidade EXATA com base nas Odds das Casas de Aposta
 async function getPredictions(id) {
-    const predictions = await fetchWithCache(`/predictions?fixture=${id}`, 12 * 60 * 60 * 1000);
-    const realOdds = await getRealOdds(id, 2 * 60 * 60 * 1000);
+    const dateHoje = new Date().toISOString().split('T')[0];
+    const dateOntem = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+    const [rawMatches, allOdds] = await Promise.all([ getMatchesData(dateOntem, dateHoje), getAllOdds() ]);
     
-    if (predictions && predictions.length > 0) {
-        predictions[0].real_odds = realOdds; 
+    const fdMatch = (rawMatches || []).find(m => m.id.toString() === id.toString());
+    if (!fdMatch) return [];
+
+    const mapped = mapToAppFormat(fdMatch, allOdds);
+    
+    let homePct = 33, drawPct = 34, awayPct = 33;
+    let winnerName = 'Draw';
+    
+    const h2h = mapped.real_odds.find(o => o.id === 1);
+    if (h2h) {
+        const hOdd = h2h.values.find(v => v.value === 'Home')?.odd || 3;
+        const aOdd = h2h.values.find(v => v.value === 'Away')?.odd || 3;
+        const dOdd = h2h.values.find(v => v.value === 'Draw')?.odd || 3;
+        
+        const hProb = 1 / hOdd; const aProb = 1 / aOdd; const dProb = 1 / dOdd;
+        const total = hProb + aProb + dProb;
+        
+        homePct = Math.round((hProb / total) * 100);
+        awayPct = Math.round((aProb / total) * 100);
+        drawPct = Math.round((dProb / total) * 100);
+        
+        if (homePct > awayPct && homePct > drawPct) winnerName = mapped.teams.home.name;
+        else if (awayPct > homePct && awayPct > drawPct) winnerName = mapped.teams.away.name;
     }
-    return predictions;
+
+    return [{
+        predictions: {
+            winner: { name: winnerName },
+            percent: { home: `${homePct}%`, draw: `${drawPct}%`, away: `${awayPct}%` }
+        },
+        teams: mapped.teams,
+        fixture: mapped.fixture,
+        real_odds: mapped.real_odds
+    }];
 }
 
 module.exports = { getTodayMatches, getHistoryMatches, getPredictions };
