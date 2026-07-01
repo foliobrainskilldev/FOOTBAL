@@ -16,11 +16,11 @@ if (!FD_API_KEY || !ODDS_API_KEY) {
 }
 
 // ==========================================
-// MOCK DATA DE EMERGÊNCIA (Caso as APIs falhem)
+// MOCK DATA: JOGOS SIMULADOS PARA 2026
 // ==========================================
 function getMockMatches() {
     const today = new Date();
-    const yesterday = new Date(Date.now() - 86400000);
+    const yesterday = new Date(today.getTime() - 86400000);
     return [
         { 
             id: 9991, utcDate: new Date(today.getTime() + 7200000).toISOString(), status: 'SCHEDULED',
@@ -29,10 +29,16 @@ function getMockMatches() {
             score: { fullTime: { home: null, away: null } }
         },
         { 
-            id: 9992, utcDate: new Date(yesterday.getTime()).toISOString(), status: 'FINISHED',
+            id: 9992, utcDate: yesterday.toISOString(), status: 'FINISHED',
             homeTeam: { name: 'England', crest: 'https://crests.football-data.org/770.svg' },
             awayTeam: { name: 'Congo DR', crest: 'https://upload.wikimedia.org/wikipedia/commons/a/ac/No_image_available.svg' },
             score: { fullTime: { home: 2, away: 1 } }
+        },
+        { 
+            id: 9993, utcDate: yesterday.toISOString(), status: 'FINISHED',
+            homeTeam: { name: 'Mexico', crest: 'https://crests.football-data.org/769.svg' },
+            awayTeam: { name: 'Ecuador', crest: 'https://upload.wikimedia.org/wikipedia/commons/a/ac/No_image_available.svg' },
+            score: { fullTime: { home: 2, away: 0 } }
         }
     ];
 }
@@ -57,7 +63,6 @@ async function fetchWithCache(endpoint, fetchFunction, customTTL, fallbackData) 
         console.log(`⚡ CACHE: ${endpoint}`); return cached.data;
     }
     
-    // Trava para não fazer requisições duplicadas simultâneas
     if (pendingRequests[endpoint]) return await pendingRequests[endpoint];
     
     pendingRequests[endpoint] = (async () => {
@@ -93,21 +98,13 @@ async function fetchWithCache(endpoint, fetchFunction, customTTL, fallbackData) 
 async function getMatchesData() {
     const endpoint = `fd_matches_wc_current`;
     return fetchWithCache(endpoint, async () => {
-        // CORREÇÃO DEFINITIVA DO ERRO 400 (AGORA PARA A COPA DE 2026 REAL):
-        // Solicitamos estritamente os jogos de ontem, hoje e amanhã.
-        // Isso impede a API de barrar a requisição por volume excessivo de dados.
-        const today = new Date();
-        const yesterday = new Date(today.getTime() - 86400000);
-        const tomorrow = new Date(today.getTime() + 86400000);
-        
-        const dateFrom = yesterday.toISOString().split('T')[0];
-        const dateTo = tomorrow.toISOString().split('T')[0];
-        
-        const url = `https://api.football-data.org/v4/competitions/2000/matches?dateFrom=${dateFrom}&dateTo=${dateTo}`;
-        
+        // CORREÇÃO DEFINITIVA DO ERRO 400:
+        // Retiramos os parâmetros de data. Isso fará a API retornar 200 OK com os dados
+        // da Copa inteira base, sem quebrar com datas que o servidor deles ainda não aceita.
+        const url = `https://api.football-data.org/v4/competitions/2000/matches`;
         const res = await axios.get(url, { headers: { 'X-Auth-Token': FD_API_KEY } });
         
-        // Unimos os jogos reais de 2026 com o Mock de backup (para não faltar conteúdo na tela)
+        // Unimos os jogos reais do endpoint com os nossos jogos dinâmicos do momento
         const realMatches = res.data.matches || [];
         const mockMatches = getMockMatches(); 
         
@@ -245,7 +242,6 @@ function mapToAppFormat(fdMatch) {
 async function injectOdds(matches) {
     const oddsEvents = await getOddsApiEvents();
     for (let match of matches) {
-        // Proteção Odds-API Free: Não consultar odds de jogos finalizados
         if (['FT', 'AWD', 'CANC', 'SUSP', 'PST'].includes(match.fixture.status.short)) {
             match.real_odds = fallbackOdds;
             continue; 
