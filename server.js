@@ -2,16 +2,13 @@ require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-const path = require('path');
 const { getPredictions, getTodayMatches, getHistoryMatches } = require('./api-football');
 
 const app = express();
 
+// Permite que o seu Frontend (em outra hospedagem) acesse este Backend
 app.use(cors());
 app.use(express.json());
-
-// Servindo arquivos estáticos (Frontend) a partir da mesma raiz do projeto
-app.use(express.static(__dirname)); 
 
 // Conexão com MongoDB
 mongoose.connect(process.env.MONGODB_URI)
@@ -26,6 +23,14 @@ const UserSchema = new mongoose.Schema({
 const User = mongoose.model('User', UserSchema);
 
 // ---- ROTAS DA API ----
+
+// Rota de Health Check (Evita o erro de arquivo HTML no Render)
+app.get('/', (req, res) => {
+    res.json({ 
+        status: 'online', 
+        message: '🚀 API Mundial Predictor IA rodando perfeitamente!' 
+    });
+});
 
 app.get('/api/matches/today', async (req, res) => {
     try {
@@ -75,11 +80,6 @@ app.post('/api/unlock', async (req, res) => {
             res.status(500).json({ error: 'Erro na validação interna.' });
         }
     }, 3000); 
-});
-
-// Rota principal para servir o index.html
-app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
 });
 
 const PORT = process.env.PORT || 3000;
