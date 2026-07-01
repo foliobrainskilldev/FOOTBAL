@@ -64,29 +64,40 @@ async function fetchWithCache(endpoint) {
 const WORLD_CUP_LEAGUE_ID = 1;
 
 async function getTodayMatches() {
-    // 1. Pega a data de hoje estritamente no fuso brasileiro
-    const dateHojeBRT = new Intl.DateTimeFormat('en-CA', {
-        timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit'
-    }).format(new Date()); 
-    
-    // 🔥 O SEGREDO (Igual seu BOT): Busca TODOS os jogos da data, sem informar Temporada/Liga
-    const endpoint = `/fixtures?date=${dateHojeBRT}&timezone=America/Sao_Paulo`;
-    
-    let todosOsJogosDoDia = await fetchWithCache(endpoint);
+    let jogosFuturosDisponiveis = [];
 
-    if(!todosOsJogosDoDia || todosOsJogosDoDia.length === 0) return [];
+    // Tenta buscar jogos nos próximos 3 dias (Hoje, Amanhã e Depois)
+    for (let i = 0; i < 3; i++) {
+        // Cria a data adicionando os dias (0 = Hoje, 1 = Amanhã, 2 = Depois)
+        const dataBusca = new Date();
+        dataBusca.setDate(dataBusca.getDate() + i);
+        
+        const dateStr = new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit'
+        }).format(dataBusca); 
+        
+        const endpoint = `/fixtures?date=${dateStr}&timezone=America/Sao_Paulo`;
+        let todosOsJogos = await fetchWithCache(endpoint);
 
-    // FILTRO LOCAL: Separa apenas os da Copa do Mundo (ID = 1)
-    let jogosCopaHoje = todosOsJogosDoDia.filter(jogo => jogo.league && jogo.league.id === WORLD_CUP_LEAGUE_ID);
+        if(todosOsJogos && todosOsJogos.length > 0) {
+            // Filtra os jogos da Copa do Mundo
+            let jogosCopa = todosOsJogos.filter(jogo => jogo.league && jogo.league.id === WORLD_CUP_LEAGUE_ID);
+            
+            // 🔥 Filtra apenas os que AINDA NÃO ACABARAM (NS = Not Started, LIVE, etc)
+            jogosCopa = jogosCopa.filter(jogo => {
+                const status = jogo.fixture?.status?.short;
+                return !['FT', 'AET', 'PEN', 'CANC', 'PST', 'ABD'].includes(status);
+            });
+
+            // Se achou pelo menos 1 jogo futuro ou ao vivo nesse dia, para de procurar e mostra ele na tela!
+            if (jogosCopa.length > 0) {
+                jogosFuturosDisponiveis = jogosCopa;
+                break; 
+            }
+        }
+    }
     
-    // 🔥 FILTRO DE STATUS: Mantém apenas os jogos Não Iniciados ou Ao Vivo. 
-    // Tira os jogos finalizados, adiados ou cancelados da aba "Hoje".
-    jogosCopaHoje = jogosCopaHoje.filter(jogo => {
-        const status = jogo.fixture?.status?.short;
-        return !['FT', 'AET', 'PEN', 'CANC', 'PST', 'ABD'].includes(status);
-    });
-    
-    return jogosCopaHoje;
+    return jogosFuturosDisponiveis;
 }
 
 async function getHistoryMatches() {
