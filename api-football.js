@@ -16,7 +16,7 @@ if (!FD_API_KEY || !ODDS_API_KEY) {
 }
 
 // ==========================================
-// MOCK DATA DE EMERGÊNCIA (EVITA TELA VAZIA)
+// MOCK DATA DE EMERGÊNCIA
 // ==========================================
 function getMockMatches() {
     const today = new Date();
@@ -33,12 +33,6 @@ function getMockMatches() {
             homeTeam: { name: 'England', crest: 'https://crests.football-data.org/770.svg' },
             awayTeam: { name: 'Congo DR', crest: 'https://upload.wikimedia.org/wikipedia/commons/a/ac/No_image_available.svg' },
             score: { fullTime: { home: 2, away: 1 } }
-        },
-        { 
-            id: 9993, utcDate: new Date(yesterday.getTime()).toISOString(), status: 'FINISHED',
-            homeTeam: { name: 'Mexico', crest: 'https://crests.football-data.org/769.svg' },
-            awayTeam: { name: 'Ecuador', crest: 'https://upload.wikimedia.org/wikipedia/commons/a/ac/No_image_available.svg' },
-            score: { fullTime: { home: 2, away: 0 } }
         }
     ];
 }
@@ -72,14 +66,21 @@ async function fetchWithCache(endpoint, fetchFunction, customTTL, fallbackData) 
                 { upsert: true }
             );
         } catch (dbErr) {
-            if (dbErr.code === 11000) console.log(`⚡ [DB] Ignorando colisão no cache para: ${endpoint}`);
+            if (dbErr.code === 11000) {} // Ignora colisão silenciosamente
         }
 
         return rData;
     } catch (err) {
-        console.error(`🚨 ERRO API [${endpoint}]:`, err.response ? err.response.status : err.message);
+        const status = err.response ? err.response.status : 'Desconhecido';
+        
+        // Logs amigáveis! (Deixa claro que no plano Free bloqueios assim são normais e o app usa o fallback).
+        if (endpoint.includes('odds_api_match') && status === 400) {
+            console.log(`⚠️ AVISO [${endpoint}]: O plano Free bloqueou odds para este jogo (jogo ao vivo/prestess a começar). O App usará odds de backup automaticamente.`);
+        } else {
+            console.log(`⚠️ AVISO [${endpoint}]: A API retornou Status ${status}. O App compensará usando o cache ou dados de emergência.`);
+        }
+        
         if (cached && cached.data) return cached.data; 
-        console.warn(`⚠️ API BLOQUEADA! INJETANDO DADOS DE EMERGÊNCIA (MOCK) EM: ${endpoint}`);
         return fallbackData; 
     }
 }
@@ -90,9 +91,17 @@ async function fetchWithCache(endpoint, fetchFunction, customTTL, fallbackData) 
 async function getMatchesData() {
     const endpoint = `fd_matches_wc_all`;
     return fetchWithCache(endpoint, async () => {
-        // CORREÇÃO DO ERRO 400: Adicionado ?season=2026. Impede que a API tente 
-        // cuspir todo o histórico desde 1930 (o que estoura o limite da Free Tier)
-        const url = `https://api.football-data.org/v4/competitions/2000/matches?season=2026`;
+        // CORREÇÃO DEFINITIVA DO ERRO 400:
+        // Buscamos na rota global /v4/matches definindo as datas de hoje e ontem (DateFrom/DateTo).
+        // Isso evita ser barrado pela rota específica da competição na conta Free!
+        const today = new Date();
+        const yesterday = new Date(today.getTime() - 86400000);
+        
+        const dateTo = today.toISOString().split('T')[0];
+        const dateFrom = yesterday.toISOString().split('T')[0];
+        
+        const url = `https://api.football-data.org/v4/matches?dateFrom=${dateFrom}&dateTo=${dateTo}`;
+        
         const res = await axios.get(url, { headers: { 'X-Auth-Token': FD_API_KEY } });
         return res.data.matches || [];
     }, 1 * 60 * 60 * 1000, getMockMatches()); 
@@ -112,8 +121,7 @@ async function getOddsApiEvents() {
 async function getOddsForEvent(eventId) {
     if (!eventId) return null;
     return fetchWithCache(`odds_api_match_${eventId}`, async () => {
-        // Buscamos a ODD puramente pelo EventID, sem filtros estritos, para evitar erros 
-        const url = `https://api.odds-api.io/v3/odds?apiKey=${ODDS_API_KEY}&eventId=${eventId}`;
+        const url = `https://api.odds-api.io/v3/odds?apiKey=${ODDS_API_KEY}&eventId=${eventId}&sport=football`;
         const res = await axios.get(url);
         return res.data;
     }, 4 * 60 * 60 * 1000, null);
@@ -221,7 +229,7 @@ function mapToAppFormat(fdMatch) {
     const statusMap = { 'SCHEDULED': 'NS', 'TIMED': 'NS', 'IN_PLAY': 'LIVE', 'PAUSED': 'HT', 'FINISHED': 'FT', 'SUSPENDED': 'SUSP', 'POSTPONED': 'PST', 'CANCELLED': 'CANC', 'AWARDED': 'AWD' };
     return {
         fixture: { id: fdMatch.id, date: fdMatch.utcDate, timestamp: new Date(fdMatch.utcDate).getTime() / 1000, status: { short: statusMap[fdMatch.status] || fdMatch.status } },
-        league: { id: 1, name: 'World Cup' }, 
+        league: { id: fdMatch.competition?.id || 1, name: fdMatch.competition?.name || 'World Cup' }, 
         teams: {
             home: { name: fdMatch.homeTeam?.name || 'TBA', logo: fdMatch.homeTeam?.crest || 'https://upload.wikimedia.org/wikipedia/commons/a/ac/No_image_available.svg' },
             away: { name: fdMatch.awayTeam?.name || 'TBA', logo: fdMatch.awayTeam?.crest || 'https://upload.wikimedia.org/wikipedia/commons/a/ac/No_image_available.svg' }
@@ -233,10 +241,6 @@ function mapToAppFormat(fdMatch) {
 async function injectOdds(matches) {
     const oddsEvents = await getOddsApiEvents();
     for (let match of matches) {
-        
-        // CORREÇÃO DO ERRO 400 DA ODDS API: 
-        // A API free não suporta buscar odds de jogos que já terminaram.
-        // Se tentarmos, ela bloqueia (400). Então pulamos e usamos os dados de mock.
         if (['FT', 'AWD', 'CANC', 'SUSP', 'PST'].includes(match.fixture.status.short)) {
             match.real_odds = fallbackOdds;
             continue; 
