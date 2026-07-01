@@ -1,5 +1,3 @@
-// --- START OF FILE api-football.js ---
-
 const axios = require('axios');
 const mongoose = require('mongoose');
 
@@ -13,14 +11,12 @@ const Cache = mongoose.models.Cache || mongoose.model('Cache', CacheSchema);
 const API_KEY = process.env.API_FOOTBALL_KEY;
 const BASE_URL = 'https://v3.football.api-sports.io';
 
-const CACHE_TTL = 1 * 60 * 60 * 1000; // 1 Hora
-
 const apiClient = axios.create({
     baseURL: BASE_URL,
     headers: { 'x-apisports-key': API_KEY }
 });
 
-async function fetchWithCache(endpoint, customTTL = CACHE_TTL) {
+async function fetchWithCache(endpoint, customTTL) {
     let cached = null;
     try { cached = await Cache.findOne({ endpoint }); } catch (e) {}
     const now = new Date();
@@ -60,19 +56,15 @@ async function fetchWithCache(endpoint, customTTL = CACHE_TTL) {
     }
 }
 
-// 🔥 BUSCA ODDS REAIS DIRETAMENTE DA API-SPORTS (Casas como Bet365, 1xBet, etc)
-async function getRealOdds(fixtureId) {
-    console.log(`📡 BUSCANDO ODDS REAIS (Fixture: ${fixtureId})`);
-    // Usamos TTL de 2 horas para Odds para economizar requisições do plano Free
-    const oddsData = await fetchWithCache(`/odds?fixture=${fixtureId}`, 2 * 60 * 60 * 1000);
-    
+// 🔥 BUSCA ODDS REAIS DA API-SPORTS
+// Usamos TTL variavel para proteger a cota do usuario
+async function getRealOdds(fixtureId, ttl) {
+    const oddsData = await fetchWithCache(`/odds?fixture=${fixtureId}`, ttl);
     if (!oddsData || oddsData.length === 0) return null;
 
-    // Pega a primeira casa de aposta disponível (Geralmente Bet365 ou 1xBet)
     const bookmakers = oddsData[0].bookmakers;
     if (!bookmakers || bookmakers.length === 0) return null;
 
-    // Retorna todos os mercados (Match Winner, Over/Under, BTTS, etc) da casa de aposta
     return bookmakers[0].bets;
 }
 
@@ -83,13 +75,19 @@ async function getTodayMatches() {
         timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit'
     }).format(new Date()); 
     
-    let todosOsJogos = await fetchWithCache(`/fixtures?date=${dateHojeBRT}&timezone=America/Sao_Paulo`);
+    let todosOsJogos = await fetchWithCache(`/fixtures?date=${dateHojeBRT}&timezone=America/Sao_Paulo`, 1 * 60 * 60 * 1000);
     if(!todosOsJogos || todosOsJogos.length === 0) return [];
 
     let jogosCopaHoje = todosOsJogos.filter(jogo => jogo.league && jogo.league.id === WORLD_CUP_LEAGUE_ID);
     jogosCopaHoje = jogosCopaHoje.filter(jogo => !['FT', 'AET', 'PEN', 'CANC', 'PST', 'ABD'].includes(jogo.fixture?.status?.short));
     
-    return jogosCopaHoje;
+    // Injeta ODDS REAIS nos jogos de hoje. TTL de 2 horas para economizar créditos.
+    const matchesWithOdds = await Promise.all(jogosCopaHoje.map(async (jogo) => {
+        const odds = await getRealOdds(jogo.fixture.id, 2 * 60 * 60 * 1000);
+        return { ...jogo, real_odds: odds };
+    }));
+
+    return matchesWithOdds;
 }
 
 async function getHistoryMatches() {
@@ -104,8 +102,8 @@ async function getHistoryMatches() {
     }).format(ontem);
 
     const [jogosHoje, jogosOntem] = await Promise.all([
-        fetchWithCache(`/fixtures?date=${dateHojeBRT}&timezone=America/Sao_Paulo`),
-        fetchWithCache(`/fixtures?date=${dateOntemBRT}&timezone=America/Sao_Paulo`)
+        fetchWithCache(`/fixtures?date=${dateHojeBRT}&timezone=America/Sao_Paulo`, 1 * 60 * 60 * 1000),
+        fetchWithCache(`/fixtures?date=${dateOntemBRT}&timezone=America/Sao_Paulo`, 1 * 60 * 60 * 1000)
     ]);
 
     let todosJogos = [...(jogosHoje || []), ...(jogosOntem || [])];
@@ -113,15 +111,22 @@ async function getHistoryMatches() {
     historicoCopa = historicoCopa.filter(m => ['FT', 'PEN', 'AET'].includes(m.fixture?.status?.short));
     historicoCopa.sort((a,b) => b.fixture.timestamp - a.fixture.timestamp);
     
-    return historicoCopa.slice(0, 15);
+    const jogosCortados = historicoCopa.slice(0, 15);
+
+    // Injeta ODDS REAIS no histórico. Como é histórico (já acabou), fazemos cache por 30 DIAS! Gasto zero futuro.
+    const matchesWithOdds = await Promise.all(jogosCortados.map(async (jogo) => {
+        const odds = await getRealOdds(jogo.fixture.id, 30 * 24 * 60 * 60 * 1000);
+        return { ...jogo, real_odds: odds };
+    }));
+    
+    return matchesWithOdds;
 }
 
 async function getPredictions(id) {
     const predictions = await fetchWithCache(`/predictions?fixture=${id}`, 12 * 60 * 60 * 1000);
-    const realOdds = await getRealOdds(id);
+    const realOdds = await getRealOdds(id, 2 * 60 * 60 * 1000);
     
     if (predictions && predictions.length > 0) {
-        // Agora anexamos as ODDS REAIS aos dados que vão pro frontend
         predictions[0].real_odds = realOdds; 
     }
     return predictions;
