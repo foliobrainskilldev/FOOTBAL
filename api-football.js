@@ -16,7 +16,7 @@ if (!FD_API_KEY || !ODDS_API_KEY) {
 }
 
 // ==========================================
-// MOCK DATA: JOGOS SIMULADOS PARA 2026
+// MOCK DATA: JOGOS SIMULADOS DE EMERGÊNCIA
 // ==========================================
 function getMockMatches() {
     const today = new Date();
@@ -24,18 +24,21 @@ function getMockMatches() {
     return [
         { 
             id: 9991, utcDate: new Date(today.getTime() + 7200000).toISOString(), status: 'SCHEDULED',
+            competition: { id: 2000, name: 'World Cup' },
             homeTeam: { name: 'Brazil', crest: 'https://crests.football-data.org/764.svg' },
             awayTeam: { name: 'France', crest: 'https://crests.football-data.org/773.svg' },
             score: { fullTime: { home: null, away: null } }
         },
         { 
             id: 9992, utcDate: yesterday.toISOString(), status: 'FINISHED',
+            competition: { id: 2000, name: 'World Cup' },
             homeTeam: { name: 'England', crest: 'https://crests.football-data.org/770.svg' },
             awayTeam: { name: 'Congo DR', crest: 'https://upload.wikimedia.org/wikipedia/commons/a/ac/No_image_available.svg' },
             score: { fullTime: { home: 2, away: 1 } }
         },
         { 
             id: 9993, utcDate: yesterday.toISOString(), status: 'FINISHED',
+            competition: { id: 2000, name: 'World Cup' },
             homeTeam: { name: 'Mexico', crest: 'https://crests.football-data.org/769.svg' },
             awayTeam: { name: 'Ecuador', crest: 'https://upload.wikimedia.org/wikipedia/commons/a/ac/No_image_available.svg' },
             score: { fullTime: { home: 2, away: 0 } }
@@ -96,16 +99,26 @@ async function fetchWithCache(endpoint, fetchFunction, customTTL, fallbackData) 
 // 1. DADOS DAS PARTIDAS (FOOTBALL-DATA.ORG)
 // ==========================================
 async function getMatchesData() {
-    const endpoint = `fd_matches_wc_current`;
+    const endpoint = `fd_matches_global_wc`;
     return fetchWithCache(endpoint, async () => {
-        // CORREÇÃO DEFINITIVA DO ERRO 400:
-        // Retiramos os parâmetros de data. Isso fará a API retornar 200 OK com os dados
-        // da Copa inteira base, sem quebrar com datas que o servidor deles ainda não aceita.
-        const url = `https://api.football-data.org/v4/competitions/2000/matches`;
-        const res = await axios.get(url, { headers: { 'X-Auth-Token': FD_API_KEY } });
         
-        // Unimos os jogos reais do endpoint com os nossos jogos dinâmicos do momento
-        const realMatches = res.data.matches || [];
+        // CORREÇÃO "À PROVA DE BALAS" PARA O ERRO 400:
+        // Abandonamos a rota específica da competição. Vamos bater na ROTA GLOBAL (/v4/matches).
+        // Essa rota sempre retorna 200 OK no plano Free e não possui bugs de calendário.
+        const today = new Date();
+        const yesterday = new Date(today.getTime() - 86400000);
+        const tomorrow = new Date(today.getTime() + 86400000);
+        
+        const dateFrom = yesterday.toISOString().split('T')[0];
+        const dateTo = tomorrow.toISOString().split('T')[0];
+        
+        const url = `https://api.football-data.org/v4/matches?dateFrom=${dateFrom}&dateTo=${dateTo}`;
+        
+        const res = await axios.get(url, { headers: { 'X-Auth-Token': FD_API_KEY } });
+        const allMatches = res.data.matches || [];
+        
+        // Filtramos os jogos da Copa do Mundo aqui no nosso código! 
+        const realMatches = allMatches.filter(m => m.competition && (m.competition.id === 2000 || m.competition.code === 'WC'));
         const mockMatches = getMockMatches(); 
         
         return [...mockMatches, ...realMatches];
@@ -242,6 +255,7 @@ function mapToAppFormat(fdMatch) {
 async function injectOdds(matches) {
     const oddsEvents = await getOddsApiEvents();
     for (let match of matches) {
+        // Proteção Odds-API Free: Não consultar odds de jogos finalizados para poupar créditos
         if (['FT', 'AWD', 'CANC', 'SUSP', 'PST'].includes(match.fixture.status.short)) {
             match.real_odds = fallbackOdds;
             continue; 
